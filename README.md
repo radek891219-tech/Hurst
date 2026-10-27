@@ -17,8 +17,9 @@ TradingView → **Pine Editor** → wklej zawartość pliku → **Add to chart**
    - `H < 0.47` → rynek **wraca do średniej** (fioletowe tło) → działają odbicia od pasm (**MR**),
    - `H > 0.53` → rynek w **trendzie** (niebieskie tło) → działają wybicia (**BO**), odbicia są wyłączone.
 3. **Filtr trendu z 15m** (EMA 50, bez repaintu): longi tylko nad EMA, shorty tylko pod nią.
-4. **Sygnały na zamkniętych świecach** (bez repaintu) + odstęp między sygnałami, żeby nie spamowały.
-5. **Tabela**: H, reżim, trend z wyższego TF, odległość ceny od środka pasm w ATR.
+4. **Filtr sesji NY** (09:35–15:55, pod Nasdaq) – sygnały tylko w głównej sesji.
+5. **Sygnały na zamkniętych świecach** (bez repaintu) + odstęp między sygnałami, żeby nie spamowały.
+6. **Tabela**: H, reżim, trend z wyższego TF, odległość ceny od środka pasm w ATR, status sesji.
 
 ## Sygnały
 - **MR ▲ / ▼** – knot wychodzi za zewnętrzne pasmo, a świeca zamyka się z powrotem w środku. Cel: CMA (szara linia).
