@@ -107,12 +107,16 @@ inSess = not useSess or not na(time(timeframe.period, sessStr, "America/New_York
 okBar  = barstate.isconfirmed and inSess
 
 // ───────────────────────── Sygnały ─────────────────────────
+xUpLo = ta.crossover(osc, -outerVal)
+xDnUp = ta.crossunder(osc, outerVal)
+xUpUp = ta.crossover(osc, outerVal)
+xDnLo = ta.crossunder(osc, -outerVal)
 // MR: oscylator wraca z obszaru za pasmem zewnętrznym
-mrLongF  = showMR and ta.crossover(osc, -outerVal) and (not useRegime or not isTrend) and (not useHtf or not htfDn)
-mrShortF = showMR and ta.crossunder(osc, outerVal) and (not useRegime or not isTrend) and (not useHtf or not htfUp)
+mrLongF  = showMR and xUpLo and (not useRegime or not isTrend) and (not useHtf or not htfDn)
+mrShortF = showMR and xDnUp and (not useRegime or not isTrend) and (not useHtf or not htfUp)
 // BO: oscylator przebija pasmo zewnętrzne w reżimie trendu
-boLongF  = showBO and ta.crossover(osc, outerVal)   and (not useRegime or isTrend) and (not useHtf or htfUp)
-boShortF = showBO and ta.crossunder(osc, -outerVal) and (not useRegime or isTrend) and (not useHtf or htfDn)
+boLongF  = showBO and xUpUp and (not useRegime or isTrend) and (not useHtf or htfUp)
+boShortF = showBO and xDnLo and (not useRegime or isTrend) and (not useHtf or htfDn)
 
 var int lastLong  = -100000
 var int lastShort = -100000
