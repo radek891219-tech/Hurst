@@ -1,0 +1,43 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Hurst Oscillator [LazyBear] – wersja pod interwał 1m (osobny panel)
+// Oscylator = odległość ceny od wycentrowanej MA, znormalizowana ATR (albo w % jak w oryginale),
+// więc poziomy ±1.6 / ±2.6 / ±4.2 odpowiadają pasmom ze skryptu "Hurst Bands 1m".
+//@version=5
+indicator("Hurst Oscillator 1m [LazyBear mod]", shorttitle="HurstOsc 1m", overlay=false)
+
+src      = input.source(hl2, "Źródło")
+length   = input.int(10, "Długość CMA", minval=2)
+oscMode  = input.string("ATR", "Jednostka", options=["ATR", "Procent (oryginał LB)"])
+atrLen   = input.int(100, "Długość ATR", minval=1)
+innerVal = input.float(1.6, "Poziom wewnętrzny", step=0.1)
+outerVal = input.float(2.6, "Poziom zewnętrzny", step=0.1)
+extremeV = input.float(4.2, "Poziom ekstremalny", step=0.1)
+sigLen   = input.int(5, "Linia sygnału (EMA)", minval=1)
+
+disp   = math.floor(length / 2) + 1
+cma    = ta.sma(src[disp], length)
+osc    = oscMode == "ATR" ? (src - cma) / ta.atr(atrLen) : (src - cma) / cma * 100
+sig    = ta.ema(osc, sigLen)
+
+col = osc >= 0 ? (osc > osc[1] ? color.new(color.green, 0) : color.new(color.green, 50)) : (osc < osc[1] ? color.new(color.red, 0) : color.new(color.red, 50))
+plot(osc, "Oscylator", style=plot.style_columns, color=col)
+plot(sig, "Sygnał", color=color.orange)
+
+hline(0, "Zero", color=color.gray)
+hU1 = hline(innerVal,  "Wewn. +", color=color.new(color.teal, 50), linestyle=hline.style_dotted)
+hL1 = hline(-innerVal, "Wewn. -", color=color.new(color.teal, 50), linestyle=hline.style_dotted)
+hU2 = hline(outerVal,  "Zewn. +", color=color.new(color.red, 30))
+hL2 = hline(-outerVal, "Zewn. -", color=color.new(color.green, 30))
+hU3 = hline(extremeV,  "Ekstr. +", color=color.new(color.red, 60), linestyle=hline.style_dashed)
+hL3 = hline(-extremeV, "Ekstr. -", color=color.new(color.green, 60), linestyle=hline.style_dashed)
+fill(hU2, hU3, color=color.new(color.red, 90))
+fill(hL2, hL3, color=color.new(color.green, 90))
+
+// Powrót z ekstremum do strefy zewnętrznej – na zamkniętej świecy
+backFromHigh = ta.crossunder(osc, outerVal) and barstate.isconfirmed
+backFromLow  = ta.crossover(osc, -outerVal) and barstate.isconfirmed
+plotshape(backFromLow,  "Powrót z dołu", shape.circle, location.bottom, color.green, size=size.tiny)
+plotshape(backFromHigh, "Powrót z góry", shape.circle, location.top,    color.red,   size=size.tiny)
+
+alertcondition(backFromLow,  "Oscylator: powrót z dołu", "HurstOsc 1m: powrót powyżej -zewn. {{ticker}} @ {{close}}")
+alertcondition(backFromHigh, "Oscylator: powrót z góry", "HurstOsc 1m: powrót poniżej +zewn. {{ticker}} @ {{close}}")

@@ -1,0 +1,197 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Hurst Bands [LazyBear] – wersja rozszerzona pod interwał 1m
+//  • oryginalna logika LazyBear (wycentrowana MA przesunięta o length/2+1)
+//  • szerokość pasm w ATR (domyślnie) albo w % jak w oryginale
+//  • wykładnik Hursta (R/S z korektą Anisa-Lloyda) jako filtr reżimu rynku
+//  • filtr trendu z wyższego interwału (bez repaintu)
+//  • sygnały tylko na zamkniętych świecach, cooldown, alerty, tabela informacyjna
+//@version=5
+indicator("Hurst Bands 1m [LazyBear mod]", shorttitle="HurstLB 1m", overlay=true, max_bars_back=500, max_labels_count=500)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpB = "Pasma Hursta (LazyBear)"
+src       = input.source(hl2, "Źródło", group=grpB)
+length    = input.int(10, "Długość CMA", minval=2, group=grpB)
+bandMode  = input.string("ATR", "Szerokość pasm", options=["ATR", "Procent (oryginał LB)"], group=grpB)
+atrLen    = input.int(100, "Długość ATR", minval=1, group=grpB)
+innerVal  = input.float(1.6, "Pasmo wewnętrzne (x ATR lub %)", step=0.1, group=grpB)
+outerVal  = input.float(2.6, "Pasmo zewnętrzne (x ATR lub %)", step=0.1, group=grpB)
+extremeV  = input.float(4.2, "Pasmo ekstremalne (x ATR lub %)", step=0.1, group=grpB)
+showExt   = input.bool(true, "Pokaż pasma ekstremalne", group=grpB)
+
+grpH = "Wykładnik Hursta (reżim rynku)"
+hWin      = input.int(128, "Okno R/S (świece)", options=[64, 128, 256], group=grpH, tooltip="Na 1m: 128 ≈ 2 godziny. Skale: okno/8, /4, /2, okno.")
+hSmooth   = input.int(5, "Wygładzanie H (EMA)", minval=1, group=grpH)
+hMR       = input.float(0.47, "H poniżej = powrót do średniej", step=0.01, group=grpH)
+hTR       = input.float(0.53, "H powyżej = trend", step=0.01, group=grpH)
+useRegime = input.bool(true, "Filtruj sygnały reżimem H", group=grpH)
+showBg    = input.bool(true, "Koloruj tło wg reżimu", group=grpH)
+
+grpF = "Filtry i sygnały"
+useHtf    = input.bool(true, "Filtr trendu z wyższego TF", group=grpF)
+htfTf     = input.timeframe("15", "Wyższy interwał", group=grpF)
+htfLen    = input.int(50, "EMA na wyższym TF", minval=1, group=grpF)
+showMR    = input.bool(true, "Sygnały odbicia od pasm (MR)", group=grpF)
+showBO    = input.bool(true, "Sygnały wybicia (BO)", group=grpF)
+cooldown  = input.int(5, "Min. odstęp między sygnałami (świece)", minval=0, group=grpF)
+confirmed = input.bool(true, "Tylko zamknięte świece (bez repaintu)", group=grpF)
+showTbl   = input.bool(true, "Pokaż tabelę", group=grpF)
+
+// ───────────────────────── Pasma Hursta (LazyBear) ─────────────────────────
+disp   = math.floor(length / 2) + 1
+dPrice = src[disp]
+cma    = ta.sma(dPrice, length)
+atr    = ta.atr(atrLen)
+
+unitW(v) => bandMode == "ATR" ? v * atr : cma * v / 100
+
+upInner = cma + unitW(innerVal)
+loInner = cma - unitW(innerVal)
+upOuter = cma + unitW(outerVal)
+loOuter = cma - unitW(outerVal)
+upExt   = cma + unitW(extremeV)
+loExt   = cma - unitW(extremeV)
+
+// ───────────────────────── Wykładnik Hursta (R/S) ─────────────────────────
+ret = math.log(close / close[1])
+
+// Przeskalowany zakres R/S z ostatnich n zwrotów
+f_rs(int n) =>
+    float sum = 0.0
+    for i = 0 to n - 1
+        sum += ret[i]
+    float mean = sum / n
+    float cum = 0.0
+    float mx  = 0.0
+    float mn  = 0.0
+    float ss  = 0.0
+    for i = n - 1 to 0
+        float d = ret[i] - mean
+        cum += d
+        mx := math.max(mx, cum)
+        mn := math.min(mn, cum)
+        ss += d * d
+    float sd = math.sqrt(ss / n)
+    sd > 0 ? (mx - mn) / sd : na
+
+// Oczekiwane R/S dla błądzenia losowego (Anis-Lloyd, aproksymacja ilorazu funkcji Gamma)
+f_ers(int n) =>
+    float s = 0.0
+    for i = 1 to n - 1
+        s += math.sqrt(float(n - i) / i)
+    ((n - 0.5) / n) * s / (math.sqrt(math.pi) * math.sqrt(n / 2.0 - 0.25))
+
+n1 = int(hWin / 8)
+n2 = int(hWin / 4)
+n3 = int(hWin / 2)
+n4 = hWin
+var float e1 = f_ers(n1)
+var float e2 = f_ers(n2)
+var float e3 = f_ers(n3)
+var float e4 = f_ers(n4)
+
+y1 = math.log(f_rs(n1) / e1)
+y2 = math.log(f_rs(n2) / e2)
+y3 = math.log(f_rs(n3) / e3)
+y4 = math.log(f_rs(n4) / e4)
+x1 = math.log(n1)
+x2 = math.log(n2)
+x3 = math.log(n3)
+x4 = math.log(n4)
+xm = (x1 + x2 + x3 + x4) / 4
+ym = (y1 + y2 + y3 + y4) / 4
+slope = ((x1 - xm) * (y1 - ym) + (x2 - xm) * (y2 - ym) + (x3 - xm) * (y3 - ym) + (x4 - xm) * (y4 - ym)) /
+     (math.pow(x1 - xm, 2) + math.pow(x2 - xm, 2) + math.pow(x3 - xm, 2) + math.pow(x4 - xm, 2))
+// Kalibracja empiryczna (symulacja Monte Carlo): dla błądzenia losowego H ≈ 0.50
+hBias    = hWin == 64 ? 0.064 : hWin == 128 ? 0.030 : 0.010
+hurstRaw = bar_index > hWin ? 0.5 + slope + hBias : na
+hurst    = ta.ema(hurstRaw, hSmooth)
+
+isMR    = hurst < hMR
+isTrend = hurst > hTR
+
+// ───────────────────────── Trend z wyższego TF (bez repaintu) ─────────────────────────
+htfEma = request.security(syminfo.tickerid, htfTf, ta.ema(close, htfLen)[1], lookahead=barmerge.lookahead_on)
+htfUp  = close > htfEma
+htfDn  = close < htfEma
+
+// ───────────────────────── Sygnały ─────────────────────────
+okBar = confirmed ? barstate.isconfirmed : true
+
+// MR: knot wybija za pasmo zewnętrzne, zamknięcie wraca do środka
+mrLongRaw  = low <= loOuter and close > loOuter
+mrShortRaw = high >= upOuter and close < upOuter
+// BO: zamknięcie za pasmem zewnętrznym w reżimie trendowym
+boLongRaw  = ta.crossover(close, upOuter)
+boShortRaw = ta.crossunder(close, loOuter)
+
+mrLongF  = showMR and mrLongRaw  and (not useRegime or not isTrend) and (not useHtf or not htfDn)
+mrShortF = showMR and mrShortRaw and (not useRegime or not isTrend) and (not useHtf or not htfUp)
+boLongF  = showBO and boLongRaw  and (not useRegime or isTrend) and (not useHtf or htfUp)
+boShortF = showBO and boShortRaw and (not useRegime or isTrend) and (not useHtf or htfDn)
+
+var int lastLong  = -100000
+var int lastShort = -100000
+longOk  = bar_index - lastLong  > cooldown
+shortOk = bar_index - lastShort > cooldown
+
+mrLong  = okBar and longOk  and mrLongF
+boLong  = okBar and longOk  and boLongF and not mrLong
+mrShort = okBar and shortOk and mrShortF
+boShort = okBar and shortOk and boShortF and not mrShort
+
+if mrLong or boLong
+    lastLong := bar_index
+if mrShort or boShort
+    lastShort := bar_index
+
+// ───────────────────────── Wykres ─────────────────────────
+pC  = plot(cma, "CMA (środek)", color=color.new(color.gray, 0), linewidth=2)
+pUI = plot(upInner, "Górne wewnętrzne", color=color.new(color.teal, 40))
+pLI = plot(loInner, "Dolne wewnętrzne", color=color.new(color.teal, 40))
+pUO = plot(upOuter, "Górne zewnętrzne", color=color.new(color.red, 20), linewidth=2)
+pLO = plot(loOuter, "Dolne zewnętrzne", color=color.new(color.green, 20), linewidth=2)
+pUE = plot(showExt ? upExt : na, "Górne ekstremalne", color=color.new(color.red, 50), style=plot.style_circles)
+pLE = plot(showExt ? loExt : na, "Dolne ekstremalne", color=color.new(color.green, 50), style=plot.style_circles)
+fill(pUI, pLI, color=color.new(color.teal, 92))
+fill(pUI, pUO, color=color.new(color.red, 92))
+fill(pLI, pLO, color=color.new(color.green, 92))
+plot(useHtf ? htfEma : na, "EMA wyższego TF", color=color.new(color.orange, 0), linewidth=1, style=plot.style_stepline)
+
+bgcolor(showBg and isTrend ? color.new(color.blue, 93) : showBg and isMR ? color.new(color.purple, 93) : na, title="Tło reżimu")
+
+plotshape(mrLong,  "MR Long",  shape.triangleup,   location.belowbar, color.new(color.green, 0), text="MR", textcolor=color.green, size=size.small)
+plotshape(mrShort, "MR Short", shape.triangledown, location.abovebar, color.new(color.red, 0),   text="MR", textcolor=color.red,   size=size.small)
+plotshape(boLong,  "BO Long",  shape.labelup,      location.belowbar, color.new(color.lime, 0),  text="BO", textcolor=color.black, size=size.small)
+plotshape(boShort, "BO Short", shape.labeldown,    location.abovebar, color.new(color.maroon, 0), text="BO", textcolor=color.white, size=size.small)
+
+// ───────────────────────── Tabela ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 4, bgcolor=color.new(color.black, 20), border_width=1)
+if showTbl and barstate.islast
+    regTxt = isTrend ? "TREND" : isMR ? "POWRÓT DO ŚREDNIEJ" : "NEUTRALNY"
+    regCol = isTrend ? color.blue : isMR ? color.purple : color.gray
+    distAtr = (close - cma) / atr
+    table.cell(tbl, 0, 0, "Hurst H", text_color=color.white)
+    table.cell(tbl, 1, 0, str.tostring(hurst, "#.000"), text_color=color.white)
+    table.cell(tbl, 0, 1, "Reżim", text_color=color.white)
+    table.cell(tbl, 1, 1, regTxt, text_color=color.white, bgcolor=regCol)
+    table.cell(tbl, 0, 2, "Trend " + htfTf, text_color=color.white)
+    table.cell(tbl, 1, 2, htfUp ? "W GÓRĘ" : "W DÓŁ", text_color=color.white, bgcolor=htfUp ? color.green : color.red)
+    table.cell(tbl, 0, 3, "Odl. od CMA", text_color=color.white)
+    table.cell(tbl, 1, 3, str.tostring(distAtr, "#.00") + " ATR", text_color=color.white)
+
+// ───────────────────────── Alerty ─────────────────────────
+alertcondition(mrLong,  "MR Long",  "Hurst 1m: odbicie od dolnego pasma (LONG) {{ticker}} @ {{close}}")
+alertcondition(mrShort, "MR Short", "Hurst 1m: odbicie od górnego pasma (SHORT) {{ticker}} @ {{close}}")
+alertcondition(boLong,  "BO Long",  "Hurst 1m: wybicie w górę w trendzie (LONG) {{ticker}} @ {{close}}")
+alertcondition(boShort, "BO Short", "Hurst 1m: wybicie w dół w trendzie (SHORT) {{ticker}} @ {{close}}")
+alertcondition(mrLong or boLong or mrShort or boShort, "Dowolny sygnał", "Hurst 1m: sygnał {{ticker}} @ {{close}}")
+
+if mrLong
+    alert("Hurst 1m MR LONG " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if mrShort
+    alert("Hurst 1m MR SHORT " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if boLong
+    alert("Hurst 1m BO LONG " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
+if boShort
+    alert("Hurst 1m BO SHORT " + syminfo.ticker + " @ " + str.tostring(close), alert.freq_once_per_bar_close)
