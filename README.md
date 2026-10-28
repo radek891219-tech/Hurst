@@ -6,6 +6,7 @@ Dwa skrypty:
 |---|---|
 | `HurstBands_1m.pine` | Pasma Hursta LazyBeara na wykresie + wykładnik Hursta (reżim rynku) + filtr wyższego TF + sygnały + alerty + tabela |
 | `HurstOscillator_1m.pine` | Oscylator Hursta LazyBeara w osobnym panelu (te same poziomy co pasma) |
+| `HurstScalper_1m.pine` | Szybki scalper na MNQ/NQ: wejścia z trendem i z odbicia wg reżimu Hursta, TP/SL w $, symulacja wyników po kosztach, dzienny limit |
 
 ## Instalacja
 TradingView → **Pine Editor** → wklej zawartość pliku → **Add to chart**. Powtórz dla drugiego pliku.

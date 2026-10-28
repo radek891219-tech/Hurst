@@ -1,0 +1,249 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Hurst Scalper 1m – szybki scalping na Nasdaqu (MNQ / NQ / NAS100)
+//  • wykładnik Hursta (R/S) wybiera tryb: trend → wejście na cofnięciu do EMA, konsolidacja → odbicie
+//  • bez opóźnionej średniej wycentrowanej – sygnał na zamknięciu świecy wyzwalającej
+//  • take profit i stop loss w dolarach (przeliczane na punkty dla Twojego kontraktu)
+//  • symulacja transakcji na historii: skuteczność, wynik netto po prowizji i poślizgu, profit factor
+//  • dzienny cel i dzienny limit straty, filtr sesji NY, alerty z poziomami TP/SL
+//@version=5
+indicator("Hurst Scalper 1m [NQ/MNQ]", shorttitle="HurstScalp", overlay=true, max_bars_back=500, max_lines_count=500, max_labels_count=500)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpT = "Cel i ryzyko ($)"
+qty        = input.int(1, "Liczba kontraktów", minval=1, group=grpT)
+tpUsd      = input.float(50, "Take profit ($)", minval=1, group=grpT)
+slUsd      = input.float(50, "Stop loss ($)", minval=1, group=grpT)
+commUsd    = input.float(1.2, "Prowizja za kontrakt w obie strony ($)", minval=0, step=0.1, group=grpT)
+slipTk     = input.int(1, "Poślizg (ticki na transakcję)", minval=0, group=grpT)
+pvMode     = input.string("Auto", "Wartość punktu", options=["Auto", "Ręcznie"], group=grpT, tooltip="Auto: MNQ = 2 $, NQ = 20 $ za punkt. Dla CFD (NAS100) wybierz Ręcznie i wpisz, ile $ daje 1 punkt przy Twojej wielkości pozycji.")
+pvManual   = input.float(1.0, "Ręcznie: $ za 1 punkt (na 1 kontrakt/lot)", group=grpT)
+dayTarget  = input.float(0, "Dzienny cel ($, 0 = wył.)", minval=0, group=grpT)
+dayMaxLoss = input.float(150, "Dzienna maks. strata ($, 0 = wył.)", minval=0, group=grpT)
+
+grpS = "Sygnały"
+useTrend  = input.bool(true, "Wejścia z trendem (cofnięcie do EMA)", group=grpS)
+useMR     = input.bool(true, "Wejścia z odbicia (tylko w konsolidacji)", group=grpS)
+fastLen   = input.int(9, "EMA szybka", minval=1, group=grpS)
+slowLen   = input.int(21, "EMA wolna", minval=2, group=grpS)
+atrLen    = input.int(14, "ATR", minval=1, group=grpS)
+mrK       = input.float(2.0, "Odbicie: odległość od EMA wolnej (x ATR)", step=0.1, group=grpS)
+useVwap   = input.bool(true, "Trend zgodny z VWAP", group=grpS)
+
+grpH = "Wykładnik Hursta (reżim rynku)"
+hWin      = input.int(64, "Okno R/S (świece)", options=[64, 128], group=grpH, tooltip="64 = szybsza reakcja (ok. 1 godz. na 1m).")
+hSmooth   = input.int(3, "Wygładzanie H (EMA)", minval=1, group=grpH)
+hMR       = input.float(0.47, "H poniżej = konsolidacja", step=0.01, group=grpH)
+hTR       = input.float(0.53, "H powyżej = trend", step=0.01, group=grpH)
+showBg    = input.bool(true, "Koloruj tło wg reżimu", group=grpH)
+
+grpX = "Sesja i wygląd"
+useSess   = input.bool(true, "Handel tylko w sesji (pozycja zamykana na końcu)", group=grpX)
+sessStr   = input.session("0935-1545", "Sesja (czas Nowego Jorku)", group=grpX)
+showLines = input.bool(true, "Rysuj linie TP / SL", group=grpX)
+showStats = input.bool(true, "Pokaż statystyki", group=grpX)
+
+// ───────────────────────── Obliczenia ─────────────────────────
+pv      = pvMode == "Auto" ? syminfo.pointvalue : pvManual
+usdPt   = pv * qty
+tpPts   = tpUsd / usdPt
+slPts   = slUsd / usdPt
+costUsd = commUsd * qty + slipTk * syminfo.mintick * usdPt
+
+emaF = ta.ema(close, fastLen)
+emaS = ta.ema(close, slowLen)
+atr  = ta.atr(atrLen)
+vwap = ta.vwap(hlc3)
+osc  = (close - emaS) / atr
+
+// ───────────────────────── Wykładnik Hursta (R/S) ─────────────────────────
+ret = math.log(close / close[1])
+
+f_rs(int n) =>
+    float acc = 0.0
+    for i = 0 to n - 1
+        acc += ret[i]
+    float mean = acc / n
+    float cum = 0.0
+    float mx  = 0.0
+    float mn  = 0.0
+    float ss  = 0.0
+    for i = n - 1 to 0
+        float d = ret[i] - mean
+        cum += d
+        mx := math.max(mx, cum)
+        mn := math.min(mn, cum)
+        ss += d * d
+    float sd = math.sqrt(ss / n)
+    sd > 0 ? (mx - mn) / sd : na
+
+f_ers(int n) =>
+    float s = 0.0
+    for i = 1 to n - 1
+        s += math.sqrt(float(n - i) / i)
+    ((n - 0.5) / n) * s / (math.sqrt(math.pi) * math.sqrt(n / 2.0 - 0.25))
+
+n1 = int(hWin / 8)
+n2 = int(hWin / 4)
+n3 = int(hWin / 2)
+n4 = hWin
+var float e1 = f_ers(n1)
+var float e2 = f_ers(n2)
+var float e3 = f_ers(n3)
+var float e4 = f_ers(n4)
+
+y1 = math.log(f_rs(n1) / e1)
+y2 = math.log(f_rs(n2) / e2)
+y3 = math.log(f_rs(n3) / e3)
+y4 = math.log(f_rs(n4) / e4)
+x1 = math.log(n1)
+x2 = math.log(n2)
+x3 = math.log(n3)
+x4 = math.log(n4)
+xm = (x1 + x2 + x3 + x4) / 4
+ym = (y1 + y2 + y3 + y4) / 4
+slope = ((x1 - xm) * (y1 - ym) + (x2 - xm) * (y2 - ym) + (x3 - xm) * (y3 - ym) + (x4 - xm) * (y4 - ym)) /
+     (math.pow(x1 - xm, 2) + math.pow(x2 - xm, 2) + math.pow(x3 - xm, 2) + math.pow(x4 - xm, 2))
+// Kalibracja empiryczna (symulacja Monte Carlo): dla błądzenia losowego H ≈ 0.50
+hBias    = hWin == 64 ? 0.064 : 0.030
+hurstRaw = bar_index > hWin ? 0.5 + slope + hBias : na
+hurst    = ta.ema(hurstRaw, hSmooth)
+
+isMR    = hurst < hMR
+isTrend = hurst > hTR
+
+// ───────────────────────── Warunki wejścia ─────────────────────────
+upTrend  = emaF > emaS and emaS > emaS[1] and (not useVwap or close > vwap)
+dnTrend  = emaF < emaS and emaS < emaS[1] and (not useVwap or close < vwap)
+touchedL = ta.lowest(low, 3) <= emaS + 0.25 * atr
+touchedH = ta.highest(high, 3) >= emaS - 0.25 * atr
+
+// Trend: cofnięcie do EMA wolnej, potem świeca zamyka się ponad szczytem poprzedniej
+trLong   = useTrend and not isMR and upTrend and touchedL and close > high[1] and close > emaF
+trShort  = useTrend and not isMR and dnTrend and touchedH and close < low[1] and close < emaF
+// Konsolidacja: cena daleko od EMA wolnej, potem świeca odwrotu
+mrLong   = useMR and isMR and osc[1] <= -mrK and close > open and close > high[1]
+mrShort  = useMR and isMR and osc[1] >= mrK and close < open and close < low[1]
+
+// ───────────────────────── Symulacja transakcji ─────────────────────────
+inSess = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
+nyDay  = dayofmonth(time, "America/New_York")
+
+var int   pos     = 0
+var float entryPx = na
+var float tpPx    = na
+var float slPx    = na
+var float dayPnl  = 0.0
+var int   nTrades = 0
+var int   nWins   = 0
+var float grossW  = 0.0
+var float grossL  = 0.0
+var float netPnl  = 0.0
+var line  lTp     = na
+var line  lSl     = na
+
+if nyDay != nyDay[1]
+    dayPnl := 0.0
+
+float exitPx  = na
+int   exitRes = 0   // 1 = TP, -1 = SL, 2 = koniec sesji
+
+if barstate.isconfirmed and pos != 0
+    // Gdy na jednej świecy padł i TP, i SL, liczymy SL (wariant ostrożny)
+    if pos == 1
+        if low <= slPx
+            exitPx  := math.min(open, slPx)
+            exitRes := -1
+        else if high >= tpPx
+            exitPx  := tpPx
+            exitRes := 1
+    else
+        if high >= slPx
+            exitPx  := math.max(open, slPx)
+            exitRes := -1
+        else if low <= tpPx
+            exitPx  := tpPx
+            exitRes := 1
+    if na(exitPx) and not inSess
+        exitPx  := close
+        exitRes := 2
+    if not na(exitPx)
+        pnl = (exitPx - entryPx) * pos * usdPt - costUsd
+        nTrades += 1
+        netPnl  += pnl
+        dayPnl  += pnl
+        if pnl > 0
+            nWins  += 1
+            grossW += pnl
+        else
+            grossL -= pnl
+        pos := 0
+
+dayLocked = (dayTarget > 0 and dayPnl >= dayTarget) or (dayMaxLoss > 0 and dayPnl <= -dayMaxLoss)
+canEnter  = barstate.isconfirmed and pos == 0 and inSess and not dayLocked
+
+longSig  = canEnter and (trLong or mrLong)
+shortSig = canEnter and not longSig and (trShort or mrShort)
+
+if longSig or shortSig
+    pos     := longSig ? 1 : -1
+    entryPx := close
+    tpPx    := math.round_to_mintick(close + pos * tpPts)
+    slPx    := math.round_to_mintick(close - pos * slPts)
+    if showLines
+        lTp := line.new(bar_index, tpPx, bar_index + 1, tpPx, color=color.new(color.green, 0), width=2)
+        lSl := line.new(bar_index, slPx, bar_index + 1, slPx, color=color.new(color.red, 0), width=2)
+
+if showLines and pos != 0 and not (longSig or shortSig)
+    line.set_x2(lTp, bar_index)
+    line.set_x2(lSl, bar_index)
+
+// ───────────────────────── Wykres ─────────────────────────
+plot(emaF, "EMA szybka", color=color.new(color.aqua, 0))
+plot(emaS, "EMA wolna", color=color.new(color.orange, 0), linewidth=2)
+plot(vwap, "VWAP", color=color.new(color.fuchsia, 0), linewidth=2)
+
+bgcolor(showBg and isTrend ? color.new(color.blue, 93) : showBg and isMR ? color.new(color.purple, 93) : na, title="Tło reżimu")
+
+plotshape(longSig and trLong,                  "Long (trend)",   shape.triangleup,   location.belowbar, color.new(color.lime, 0),   text="L",    textcolor=color.lime,   size=size.small)
+plotshape(longSig and not trLong,              "Long (odbicie)", shape.triangleup,   location.belowbar, color.new(color.green, 0),  text="L·MR", textcolor=color.green,  size=size.small)
+plotshape(shortSig and trShort,                "Short (trend)",  shape.triangledown, location.abovebar, color.new(color.red, 0),    text="S",    textcolor=color.red,    size=size.small)
+plotshape(shortSig and not trShort,            "Short (odbicie)", shape.triangledown, location.abovebar, color.new(color.maroon, 0), text="S·MR", textcolor=color.maroon, size=size.small)
+plotshape(exitRes == 1 ? exitPx : na,          "TP trafiony",    shape.circle,  location.absolute, color.new(color.green, 0), size=size.tiny)
+plotshape(exitRes == -1 ? exitPx : na,         "SL trafiony",    shape.xcross,  location.absolute, color.new(color.red, 0),   size=size.tiny)
+plotshape(exitRes == 2 ? exitPx : na,          "Koniec sesji",   shape.square,  location.absolute, color.new(color.gray, 0),  size=size.tiny)
+
+// ───────────────────────── Statystyki ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 9, bgcolor=color.new(color.black, 20), border_width=1)
+if showStats and barstate.islast
+    winRate  = nTrades > 0 ? 100.0 * nWins / nTrades : na
+    pf       = grossL > 0 ? grossW / grossL : na
+    beRate   = 100.0 * (slUsd + costUsd) / (tpUsd + slUsd)
+    regTxt   = isTrend ? "TREND" : isMR ? "KONSOLIDACJA" : "NEUTRALNY"
+    regCol   = isTrend ? color.blue : isMR ? color.purple : color.gray
+    wrCol    = na(winRate) ? color.gray : winRate > beRate ? color.green : color.red
+    table.cell(tbl, 0, 0, "Reżim (H " + str.tostring(hurst, "#.00") + ")", text_color=color.white)
+    table.cell(tbl, 1, 0, regTxt, text_color=color.white, bgcolor=regCol)
+    table.cell(tbl, 0, 1, "TP / SL (pkt)", text_color=color.white)
+    table.cell(tbl, 1, 1, str.tostring(tpPts, "#.##") + " / " + str.tostring(slPts, "#.##"), text_color=color.white)
+    table.cell(tbl, 0, 2, "Transakcje", text_color=color.white)
+    table.cell(tbl, 1, 2, str.tostring(nTrades), text_color=color.white)
+    table.cell(tbl, 0, 3, "Skuteczność", text_color=color.white)
+    table.cell(tbl, 1, 3, str.tostring(winRate, "#.0") + " %", text_color=color.white, bgcolor=wrCol)
+    table.cell(tbl, 0, 4, "Potrzebna na zero", text_color=color.white)
+    table.cell(tbl, 1, 4, str.tostring(beRate, "#.0") + " %", text_color=color.white)
+    table.cell(tbl, 0, 5, "Profit factor", text_color=color.white)
+    table.cell(tbl, 1, 5, str.tostring(pf, "#.00"), text_color=color.white)
+    table.cell(tbl, 0, 6, "Wynik netto ($)", text_color=color.white)
+    table.cell(tbl, 1, 6, str.tostring(netPnl, "#.00"), text_color=color.white, bgcolor=netPnl >= 0 ? color.green : color.red)
+    table.cell(tbl, 0, 7, "Dziś ($)", text_color=color.white)
+    table.cell(tbl, 1, 7, str.tostring(dayPnl, "#.00"), text_color=color.white, bgcolor=dayPnl >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+    table.cell(tbl, 0, 8, "Status", text_color=color.white)
+    table.cell(tbl, 1, 8, dayLocked ? "STOP NA DZIŚ" : pos == 1 ? "W POZYCJI LONG" : pos == -1 ? "W POZYCJI SHORT" : "CZEKAM", text_color=color.white, bgcolor=dayLocked ? color.orange : color.gray)
+
+// ───────────────────────── Alerty ─────────────────────────
+alertcondition(longSig,  "LONG",  "Hurst Scalper: LONG {{ticker}} @ {{close}}")
+alertcondition(shortSig, "SHORT", "Hurst Scalper: SHORT {{ticker}} @ {{close}}")
+alertcondition(longSig or shortSig, "Dowolne wejście", "Hurst Scalper: wejście {{ticker}} @ {{close}}")
+
+if longSig or shortSig
+    alert((longSig ? "LONG " : "SHORT ") + syminfo.ticker + " @ " + str.tostring(entryPx, format.mintick) + " | TP " + str.tostring(tpPx, format.mintick) + " | SL " + str.tostring(slPx, format.mintick), alert.freq_once_per_bar_close)
