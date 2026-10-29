@@ -4,6 +4,7 @@
 //  • średnia (albo mediana) ostatnich N fal w górę i w dół – w punktach, w $ i w świecach
 //  • postęp obecnej fali w % średniej + prognoza na wykresie
 //  • wejście, gdy korekta osiągnie swoją typową wielkość i świeca zawraca w kierunku trendu
+//  • filtry: głębokość cofnięcia, wolumen korekty vs fali, strona VWAP
 //  • TP z wielkości średniej fali albo w stałych $, SL za dołkiem/szczytem korekty
 //  • symulacja wyników po kosztach, dzienny limit straty, alerty
 //@version=5
@@ -28,6 +29,14 @@ tpPct    = input.int(60, "TP: % średniej fali w kierunku trendu", minval=10, ma
 tpUsdIn  = input.float(50, "TP: stałe $", minval=1, group=grpE)
 slBuf    = input.float(0.3, "SL: zapas za dołkiem/szczytem korekty (x ATR)", minval=0, step=0.05, group=grpE)
 maxSlUsd = input.float(100, "Pomiń wejście, gdy SL większy niż ($)", minval=1, group=grpE)
+
+grpF = "Filtry wejścia"
+useRetr  = input.bool(true, "Filtr cofnięcia (korekta jako % poprzedniej fali)", group=grpF)
+retrMin  = input.int(30, "Cofnięcie min. %", minval=0, group=grpF)
+retrMax  = input.int(79, "Cofnięcie maks. %", minval=1, group=grpF, tooltip="Korekta głębsza niż ok. 79% fali zwykle oznacza, że trend się łamie.")
+useVol   = input.bool(true, "Filtr wolumenu (korekta na mniejszym wolumenie niż fala)", group=grpF)
+volMax   = input.float(1.0, "Wolumen korekty / wolumen fali – maks.", minval=0.1, step=0.05, group=grpF)
+useVwapF = input.bool(false, "Long tylko nad VWAP, short tylko pod VWAP", group=grpF)
 
 grpT = "Koszty, limity, sesja"
 qty        = input.int(1, "Liczba kontraktów", minval=1, group=grpT)
@@ -64,6 +73,17 @@ f_avg(float[] a) =>
 f_avgI(int[] a) =>
     array.size(a) > 0 ? (useMed ? array.median(a) : array.avg(a)) : na
 
+// Średni wolumen świec od a do b świec temu
+f_avgVol(int a, int b) =>
+    float r = na
+    if not na(a) and not na(b) and a <= 400 and b >= a
+        float acc = 0.0
+        int hi = math.min(b, 400)
+        for i = a to hi
+            acc += nz(volume[i])
+        r := acc / (hi - a + 1)
+    r
+
 f_list(float[] a) =>
     string s = "–"
     if array.size(a) > 0
@@ -78,6 +98,7 @@ var float ext     = na     // bieżący szczyt/dołek trwającej fali
 var int   extBar  = na
 var float piv     = na     // początek trwającej fali (ostatni potwierdzony szczyt/dołek)
 var int   pivBar  = na
+var int   prevPivBar = na
 var int   nPivots = 0
 var float lastH   = na
 var float prevH   = na
@@ -124,6 +145,7 @@ if newHigh
     lastH   := ext
     nPivots += 1
     piv     := ext
+    prevPivBar := pivBar
     pivBar  := extBar
     dir     := -1
     ext     := low
@@ -142,6 +164,7 @@ if newLow
     lastL   := ext
     nPivots += 1
     piv     := ext
+    prevPivBar := pivBar
     pivBar  := extBar
     dir     := 1
     ext     := high
@@ -180,8 +203,27 @@ slPxS  = corrHighS + slBuf * atr
 slUsdL = (close - slPxL) * usdPt
 slUsdS = (slPxS - close) * usdPt
 
-setupL = trendUp and corrSizeL >= avgDn * corrPct / 100 and trigL and slUsdL > 0 and slUsdL <= maxSlUsd and tpPtsL > 0
-setupS = trendDn and corrSizeS >= avgUp * corrPct / 100 and trigS and slUsdS > 0 and slUsdS <= maxSlUsd and tpPtsS > 0
+// Filtry
+vwap     = ta.vwap(hlc3)
+impL     = array.size(upLegs) > 0 ? array.last(upLegs) : na
+impS     = array.size(dnLegs) > 0 ? array.last(dnLegs) : na
+retrL    = impL > 0 ? 100 * corrSizeL / impL : na
+retrS    = impS > 0 ? 100 * corrSizeS / impS : na
+legBars  = bar_index - pivBar
+corrVol  = f_avgVol(1, legBars)
+impVol   = f_avgVol(legBars, bar_index - prevPivBar)
+volRatio = impVol > 0 ? corrVol / impVol : na
+
+retrOkL = not useRetr or (retrL >= retrMin and retrL <= retrMax)
+retrOkS = not useRetr or (retrS >= retrMin and retrS <= retrMax)
+// Gdy fala potwierdziła się na tej świecy, pomiar wolumenu dotyczyłby złych odcinków – wtedy filtr pomijamy
+volOkL  = not useVol or newLow or na(volRatio) or volRatio <= volMax
+volOkS  = not useVol or newHigh or na(volRatio) or volRatio <= volMax
+vwapOkL = not useVwapF or close > vwap
+vwapOkS = not useVwapF or close < vwap
+
+setupL = trendUp and corrSizeL >= avgDn * corrPct / 100 and trigL and slUsdL > 0 and slUsdL <= maxSlUsd and tpPtsL > 0 and retrOkL and volOkL and vwapOkL
+setupS = trendDn and corrSizeS >= avgUp * corrPct / 100 and trigS and slUsdS > 0 and slUsdS <= maxSlUsd and tpPtsS > 0 and retrOkS and volOkS and vwapOkS
 
 // ───────────────────────── Symulacja transakcji ─────────────────────────
 inSess = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
@@ -262,6 +304,7 @@ plotshape(exitRes == 1 ? exitPx : na,  "TP trafiony",  shape.circle, location.ab
 plotshape(exitRes == -1 ? exitPx : na, "SL trafiony",  shape.xcross, location.absolute, color.new(color.red, 0),   size=size.tiny)
 plotshape(exitRes == 2 ? exitPx : na,  "Koniec sesji", shape.square, location.absolute, color.new(color.gray, 0),  size=size.tiny)
 plot(trendMode == "EMA 50" ? ema50 : na, "EMA 50", color=color.new(color.orange, 0))
+plot(useVwapF ? vwap : na, "VWAP", color=color.new(color.fuchsia, 0), linewidth=2)
 
 // Trwająca fala i prognoza ze średnich
 var line  curLine = na
@@ -288,7 +331,7 @@ if barstate.islast
         lbNext := label.new(bar_index + 15, nxt, nTxt + " " + str.tostring(nxt, format.mintick), style=label.style_label_left, color=color.new(color.orange, 20), textcolor=color.white, size=size.small)
 
 // ───────────────────────── Tabela ─────────────────────────
-var table tbl = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 20), border_width=1)
+var table tbl = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 20), border_width=1)
 if showStats and barstate.islast
     sType   = useMed ? "Mediana" : "Średnia"
     winRate = nTrades > 0 ? 100.0 * nWins / nTrades : na
@@ -309,6 +352,9 @@ if showStats and barstate.islast
     table.cell(tbl, 1, 5, trTxt, text_color=color.white, bgcolor=trCol)
     table.cell(tbl, 0, 6, "Obecna fala", text_color=color.white)
     table.cell(tbl, 1, 6, (dir == 1 ? "↑ " : "↓ ") + str.tostring(curLeg, "#.#") + " pkt (" + str.tostring(curPct, "#") + "% śr.)", text_color=color.white, bgcolor=pctCol)
+    curRetr = dir == -1 ? retrL : retrS
+    table.cell(tbl, 0, 11, "Korekta: cofnięcie / wolumen", text_color=color.white)
+    table.cell(tbl, 1, 11, str.tostring(curRetr, "#") + "% fali / " + str.tostring(volRatio, "#.0#") + "x", text_color=color.white, bgcolor=(curRetr >= retrMin and curRetr <= retrMax and (na(volRatio) or volRatio <= volMax)) ? color.new(color.green, 40) : color.new(color.gray, 40))
     table.cell(tbl, 0, 7, "Transakcje", text_color=color.white)
     table.cell(tbl, 1, 7, str.tostring(nTrades), text_color=color.white)
     table.cell(tbl, 0, 8, "Skuteczność", text_color=color.white)
