@@ -1,0 +1,336 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// Fale Hursta 1m – miernik fal i korekt (MNQ / NQ / NAS100)
+//  • zygzak liczy fale: nowa fala dopiero po zwrocie o min. X ATR (szum się nie liczy)
+//  • średnia (albo mediana) ostatnich N fal w górę i w dół – w punktach, w $ i w świecach
+//  • postęp obecnej fali w % średniej + prognoza na wykresie
+//  • wejście, gdy korekta osiągnie swoją typową wielkość i świeca zawraca w kierunku trendu
+//  • TP z wielkości średniej fali albo w stałych $, SL za dołkiem/szczytem korekty
+//  • symulacja wyników po kosztach, dzienny limit straty, alerty
+//@version=5
+indicator("Fale Hursta 1m – miernik korekt [NQ/MNQ]", shorttitle="Fale 1m", overlay=true, max_bars_back=500, max_lines_count=500, max_labels_count=500)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpZ = "Fale (zygzak)"
+revK     = input.float(2.0, "Min. zwrot, by zaliczyć falę (x ATR)", step=0.1, group=grpZ, tooltip="Mniej = więcej mniejszych fal, więcej = tylko duże fale.")
+minPts   = input.float(8, "Min. zwrot w punktach", minval=0, step=1, group=grpZ)
+atrLen   = input.int(50, "ATR", minval=1, group=grpZ)
+nWaves   = input.int(5, "Ile ostatnich fal uśredniać", minval=1, maxval=50, group=grpZ)
+useMed   = input.bool(false, "Mediana zamiast średniej", group=grpZ, tooltip="Mediana mniej reaguje na pojedyncze ogromne fale (np. przy newsach).")
+showZz   = input.bool(true, "Rysuj fale", group=grpZ)
+showLbl  = input.bool(true, "Podpisz wielkość fal", group=grpZ)
+showProj = input.bool(true, "Rysuj prognozę ze średnich", group=grpZ)
+
+grpE = "Wejście na końcu korekty"
+trendMode = input.string("Szczyty i dołki", "Trend wg", options=["Szczyty i dołki", "EMA 50", "Oba kierunki"], group=grpE, tooltip="Szczyty i dołki: trend wzrostowy = wyższe szczyty i wyższe dołki. Oba kierunki: bez filtra trendu.")
+corrPct  = input.int(80, "Korekta musi osiągnąć (% średniej korekty)", minval=10, maxval=300, group=grpE)
+tpMode   = input.string("% średniej fali", "Take profit", options=["% średniej fali", "Stałe $"], group=grpE)
+tpPct    = input.int(60, "TP: % średniej fali w kierunku trendu", minval=10, maxval=200, group=grpE)
+tpUsdIn  = input.float(50, "TP: stałe $", minval=1, group=grpE)
+slBuf    = input.float(0.3, "SL: zapas za dołkiem/szczytem korekty (x ATR)", minval=0, step=0.05, group=grpE)
+maxSlUsd = input.float(100, "Pomiń wejście, gdy SL większy niż ($)", minval=1, group=grpE)
+
+grpT = "Koszty, limity, sesja"
+qty        = input.int(1, "Liczba kontraktów", minval=1, group=grpT)
+commUsd    = input.float(1.2, "Prowizja za kontrakt w obie strony ($)", minval=0, step=0.1, group=grpT)
+slipTk     = input.int(1, "Poślizg (ticki na transakcję)", minval=0, group=grpT)
+pvMode     = input.string("Auto", "Wartość punktu", options=["Auto", "Ręcznie"], group=grpT, tooltip="Auto: MNQ = 2 $, NQ = 20 $ za punkt. Dla CFD (NAS100) wybierz Ręcznie.")
+pvManual   = input.float(1.0, "Ręcznie: $ za 1 punkt (na 1 kontrakt/lot)", group=grpT)
+dayMaxLoss = input.float(150, "Dzienna maks. strata ($, 0 = wył.)", minval=0, group=grpT)
+useSess    = input.bool(true, "Handel tylko w sesji (pozycja zamykana na końcu)", group=grpT)
+sessStr    = input.session("0935-1545", "Sesja (czas Nowego Jorku)", group=grpT)
+showStats  = input.bool(true, "Pokaż tabelę", group=grpT)
+
+// ───────────────────────── Podstawy ─────────────────────────
+pv      = pvMode == "Auto" ? syminfo.pointvalue : pvManual
+usdPt   = pv * qty
+costUsd = commUsd * qty + slipTk * syminfo.mintick * usdPt
+atr     = ta.atr(atrLen)
+thr     = math.max(revK * atr, minPts)
+ema50   = ta.ema(close, 50)
+
+f_push(float[] a, float v) =>
+    array.push(a, v)
+    if array.size(a) > nWaves
+        array.shift(a)
+
+f_pushI(int[] a, int v) =>
+    array.push(a, v)
+    if array.size(a) > nWaves
+        array.shift(a)
+
+f_avg(float[] a) =>
+    array.size(a) > 0 ? (useMed ? array.median(a) : array.avg(a)) : na
+
+f_avgI(int[] a) =>
+    array.size(a) > 0 ? (useMed ? array.median(a) : array.avg(a)) : na
+
+f_list(float[] a) =>
+    string s = "–"
+    if array.size(a) > 0
+        s := ""
+        for i = 0 to array.size(a) - 1
+            s += (i > 0 ? ", " : "") + str.tostring(array.get(a, i), "#")
+    s
+
+// ───────────────────────── Zygzak: wykrywanie fal ─────────────────────────
+var int   dir     = 0      // 1 = trwa fala w górę, -1 = trwa fala w dół
+var float ext     = na     // bieżący szczyt/dołek trwającej fali
+var int   extBar  = na
+var float piv     = na     // początek trwającej fali (ostatni potwierdzony szczyt/dołek)
+var int   pivBar  = na
+var int   nPivots = 0
+var float lastH   = na
+var float prevH   = na
+var float lastL   = na
+var float prevL   = na
+var float lastLeg = na
+var float[] upLegs = array.new_float()
+var float[] dnLegs = array.new_float()
+var int[]   upDur  = array.new_int()
+var int[]   dnDur  = array.new_int()
+
+bool newHigh = false
+bool newLow  = false
+
+if na(ext)
+    dir    := 1
+    ext    := high
+    extBar := bar_index
+    piv    := low
+    pivBar := bar_index
+else if dir == 1
+    if high > ext
+        ext    := high
+        extBar := bar_index
+    else if ext - low >= thr
+        newHigh := true
+else
+    if low < ext
+        ext    := low
+        extBar := bar_index
+    else if high - ext >= thr
+        newLow := true
+
+if newHigh
+    lastLeg := ext - piv
+    if nPivots > 0
+        f_push(upLegs, lastLeg)
+        f_pushI(upDur, extBar - pivBar)
+        if showZz
+            line.new(pivBar, piv, extBar, ext, color=color.new(color.green, 0), width=2)
+        if showLbl
+            label.new(extBar, ext, "+" + str.tostring(lastLeg, "#.#"), style=label.style_label_down, color=color.new(color.black, 100), textcolor=color.green, size=size.small)
+    prevH   := lastH
+    lastH   := ext
+    nPivots += 1
+    piv     := ext
+    pivBar  := extBar
+    dir     := -1
+    ext     := low
+    extBar  := bar_index
+
+if newLow
+    lastLeg := piv - ext
+    if nPivots > 0
+        f_push(dnLegs, lastLeg)
+        f_pushI(dnDur, extBar - pivBar)
+        if showZz
+            line.new(pivBar, piv, extBar, ext, color=color.new(color.red, 0), width=2)
+        if showLbl
+            label.new(extBar, ext, "−" + str.tostring(lastLeg, "#.#"), style=label.style_label_up, color=color.new(color.black, 100), textcolor=color.red, size=size.small)
+    prevL   := lastL
+    lastL   := ext
+    nPivots += 1
+    piv     := ext
+    pivBar  := extBar
+    dir     := 1
+    ext     := high
+    extBar  := bar_index
+
+avgUp    = f_avg(upLegs)
+avgDn    = f_avg(dnLegs)
+avgUpDur = f_avgI(upDur)
+avgDnDur = f_avgI(dnDur)
+curLeg   = dir == 1 ? ext - piv : piv - ext
+curAvg   = dir == 1 ? avgUp : avgDn
+curPct   = curAvg > 0 ? 100 * curLeg / curAvg : na
+
+// ───────────────────────── Trend ─────────────────────────
+pivUp = lastH > prevH and lastL > prevL
+pivDn = lastH < prevH and lastL < prevL
+emaUp = close > ema50 and ema50 > ema50[1]
+emaDn = close < ema50 and ema50 < ema50[1]
+trendUp = trendMode == "Szczyty i dołki" ? pivUp : trendMode == "EMA 50" ? emaUp : true
+trendDn = trendMode == "Szczyty i dołki" ? pivDn : trendMode == "EMA 50" ? emaDn : true
+
+// ───────────────────────── Sygnały: koniec korekty ─────────────────────────
+// Long: trwa (albo właśnie się skończyła) fala w dół, osiągnęła typową wielkość, świeca zawraca w górę
+corrSizeL = dir == -1 ? curLeg : newLow ? lastLeg : na
+corrLowL  = dir == -1 ? ext : newLow ? piv : na
+corrSizeS = dir == 1 ? curLeg : newHigh ? lastLeg : na
+corrHighS = dir == 1 ? ext : newHigh ? piv : na
+
+trigL = close > open and close > high[1]
+trigS = close < open and close < low[1]
+
+tpPtsL = tpMode == "Stałe $" ? tpUsdIn / usdPt : avgUp * tpPct / 100
+tpPtsS = tpMode == "Stałe $" ? tpUsdIn / usdPt : avgDn * tpPct / 100
+slPxL  = corrLowL - slBuf * atr
+slPxS  = corrHighS + slBuf * atr
+slUsdL = (close - slPxL) * usdPt
+slUsdS = (slPxS - close) * usdPt
+
+setupL = trendUp and corrSizeL >= avgDn * corrPct / 100 and trigL and slUsdL > 0 and slUsdL <= maxSlUsd and tpPtsL > 0
+setupS = trendDn and corrSizeS >= avgUp * corrPct / 100 and trigS and slUsdS > 0 and slUsdS <= maxSlUsd and tpPtsS > 0
+
+// ───────────────────────── Symulacja transakcji ─────────────────────────
+inSess = not useSess or not na(time(timeframe.period, sessStr, "America/New_York"))
+nyDay  = dayofmonth(time, "America/New_York")
+
+var int   pos     = 0
+var float entryPx = na
+var float tpPx    = na
+var float slPx    = na
+var float dayPnl  = 0.0
+var int   nTrades = 0
+var int   nWins   = 0
+var float grossW  = 0.0
+var float grossL  = 0.0
+var float netPnl  = 0.0
+var line  lTp     = na
+var line  lSl     = na
+
+if nyDay != nyDay[1]
+    dayPnl := 0.0
+
+float exitPx  = na
+int   exitRes = 0   // 1 = TP, -1 = SL, 2 = koniec sesji
+
+if barstate.isconfirmed and pos != 0
+    // Gdy na jednej świecy padł i TP, i SL, liczymy SL (wariant ostrożny)
+    if pos == 1
+        if low <= slPx
+            exitPx  := math.min(open, slPx)
+            exitRes := -1
+        else if high >= tpPx
+            exitPx  := tpPx
+            exitRes := 1
+    else
+        if high >= slPx
+            exitPx  := math.max(open, slPx)
+            exitRes := -1
+        else if low <= tpPx
+            exitPx  := tpPx
+            exitRes := 1
+    if na(exitPx) and not inSess
+        exitPx  := close
+        exitRes := 2
+    if not na(exitPx)
+        pnl = (exitPx - entryPx) * pos * usdPt - costUsd
+        nTrades += 1
+        netPnl  += pnl
+        dayPnl  += pnl
+        if pnl > 0
+            nWins  += 1
+            grossW += pnl
+        else
+            grossL -= pnl
+        pos := 0
+
+dayLocked = dayMaxLoss > 0 and dayPnl <= -dayMaxLoss
+canEnter  = barstate.isconfirmed and pos == 0 and inSess and not dayLocked
+
+longSig  = canEnter and setupL
+shortSig = canEnter and not longSig and setupS
+
+if longSig or shortSig
+    pos     := longSig ? 1 : -1
+    entryPx := close
+    tpPx    := math.round_to_mintick(longSig ? close + tpPtsL : close - tpPtsS)
+    slPx    := math.round_to_mintick(longSig ? slPxL : slPxS)
+    lTp     := line.new(bar_index, tpPx, bar_index + 1, tpPx, color=color.new(color.green, 0), width=2, style=line.style_dashed)
+    lSl     := line.new(bar_index, slPx, bar_index + 1, slPx, color=color.new(color.red, 0), width=2, style=line.style_dashed)
+
+if pos != 0 and not (longSig or shortSig)
+    line.set_x2(lTp, bar_index)
+    line.set_x2(lSl, bar_index)
+
+// ───────────────────────── Wykres ─────────────────────────
+plotshape(longSig,  "Long: koniec korekty",  shape.triangleup,   location.belowbar, color.new(color.lime, 0), text="L", textcolor=color.lime, size=size.small)
+plotshape(shortSig, "Short: koniec korekty", shape.triangledown, location.abovebar, color.new(color.red, 0),  text="S", textcolor=color.red,  size=size.small)
+plotshape(exitRes == 1 ? exitPx : na,  "TP trafiony",  shape.circle, location.absolute, color.new(color.green, 0), size=size.tiny)
+plotshape(exitRes == -1 ? exitPx : na, "SL trafiony",  shape.xcross, location.absolute, color.new(color.red, 0),   size=size.tiny)
+plotshape(exitRes == 2 ? exitPx : na,  "Koniec sesji", shape.square, location.absolute, color.new(color.gray, 0),  size=size.tiny)
+plot(trendMode == "EMA 50" ? ema50 : na, "EMA 50", color=color.new(color.orange, 0))
+
+// Trwająca fala i prognoza ze średnich
+var line  curLine = na
+var line  pTgt    = na
+var line  pNext   = na
+var label lbTgt   = na
+var label lbNext  = na
+if barstate.islast
+    line.delete(curLine)
+    line.delete(pTgt)
+    line.delete(pNext)
+    label.delete(lbTgt)
+    label.delete(lbNext)
+    if showZz and nPivots > 0
+        curLine := line.new(pivBar, piv, extBar, ext, color=color.new(color.gray, 0), width=2, style=line.style_dotted)
+    if showProj and not na(avgUp) and not na(avgDn)
+        tgt  = dir == 1 ? piv + avgUp : piv - avgDn
+        nxt  = dir == 1 ? ext - avgDn : ext + avgUp
+        tTxt = dir == 1 ? "Średni koniec fali w górę" : "Średni koniec fali w dół"
+        nTxt = dir == 1 ? "Średnia korekta od szczytu" : "Średnie odbicie od dołka"
+        pTgt   := line.new(bar_index, tgt, bar_index + 15, tgt, color=color.new(color.blue, 0), width=1, style=line.style_dashed)
+        pNext  := line.new(bar_index, nxt, bar_index + 15, nxt, color=color.new(color.orange, 0), width=1, style=line.style_dashed)
+        lbTgt  := label.new(bar_index + 15, tgt, tTxt + " " + str.tostring(tgt, format.mintick), style=label.style_label_left, color=color.new(color.blue, 20), textcolor=color.white, size=size.small)
+        lbNext := label.new(bar_index + 15, nxt, nTxt + " " + str.tostring(nxt, format.mintick), style=label.style_label_left, color=color.new(color.orange, 20), textcolor=color.white, size=size.small)
+
+// ───────────────────────── Tabela ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 11, bgcolor=color.new(color.black, 20), border_width=1)
+if showStats and barstate.islast
+    sType   = useMed ? "Mediana" : "Średnia"
+    winRate = nTrades > 0 ? 100.0 * nWins / nTrades : na
+    trTxt   = trendUp and trendDn ? "BEZ FILTRA" : trendUp ? "W GÓRĘ" : trendDn ? "W DÓŁ" : "BRAK"
+    trCol   = trendUp and trendDn ? color.gray : trendUp ? color.green : trendDn ? color.red : color.gray
+    pctCol  = na(curPct) ? color.gray : curPct >= 100 ? color.orange : curPct >= corrPct ? color.yellow : color.gray
+    table.cell(tbl, 0, 0, sType + " fala ↑ (" + str.tostring(array.size(upLegs)) + ")", text_color=color.white)
+    table.cell(tbl, 1, 0, str.tostring(avgUp, "#.#") + " pkt = " + str.tostring(avgUp * usdPt, "#") + " $", text_color=color.white, bgcolor=color.new(color.green, 50))
+    table.cell(tbl, 0, 1, sType + " fala ↓ (" + str.tostring(array.size(dnLegs)) + ")", text_color=color.white)
+    table.cell(tbl, 1, 1, str.tostring(avgDn, "#.#") + " pkt = " + str.tostring(avgDn * usdPt, "#") + " $", text_color=color.white, bgcolor=color.new(color.red, 50))
+    table.cell(tbl, 0, 2, "Ostatnie fale ↑", text_color=color.white)
+    table.cell(tbl, 1, 2, f_list(upLegs), text_color=color.white)
+    table.cell(tbl, 0, 3, "Ostatnie fale ↓", text_color=color.white)
+    table.cell(tbl, 1, 3, f_list(dnLegs), text_color=color.white)
+    table.cell(tbl, 0, 4, "Czas fali ↑ / ↓", text_color=color.white)
+    table.cell(tbl, 1, 4, str.tostring(avgUpDur, "#") + " / " + str.tostring(avgDnDur, "#") + " świec", text_color=color.white)
+    table.cell(tbl, 0, 5, "Trend", text_color=color.white)
+    table.cell(tbl, 1, 5, trTxt, text_color=color.white, bgcolor=trCol)
+    table.cell(tbl, 0, 6, "Obecna fala", text_color=color.white)
+    table.cell(tbl, 1, 6, (dir == 1 ? "↑ " : "↓ ") + str.tostring(curLeg, "#.#") + " pkt (" + str.tostring(curPct, "#") + "% śr.)", text_color=color.white, bgcolor=pctCol)
+    table.cell(tbl, 0, 7, "Transakcje", text_color=color.white)
+    table.cell(tbl, 1, 7, str.tostring(nTrades), text_color=color.white)
+    table.cell(tbl, 0, 8, "Skuteczność", text_color=color.white)
+    table.cell(tbl, 1, 8, str.tostring(winRate, "#.0") + " %", text_color=color.white)
+    table.cell(tbl, 0, 9, "Wynik netto ($)", text_color=color.white)
+    table.cell(tbl, 1, 9, str.tostring(netPnl, "#.00"), text_color=color.white, bgcolor=netPnl >= 0 ? color.green : color.red)
+    table.cell(tbl, 0, 10, "Status", text_color=color.white)
+    table.cell(tbl, 1, 10, dayLocked ? "STOP NA DZIŚ" : pos == 1 ? "W POZYCJI LONG" : pos == -1 ? "W POZYCJI SHORT" : "CZEKAM", text_color=color.white, bgcolor=dayLocked ? color.orange : color.gray)
+
+// ───────────────────────── Alerty ─────────────────────────
+var bool avgHit = false
+if newHigh or newLow
+    avgHit := false
+reachAvg = barstate.isconfirmed and not avgHit and curPct >= 100
+if reachAvg
+    avgHit := true
+
+alertcondition(longSig,  "LONG: koniec korekty",  "Fale 1m: LONG {{ticker}} @ {{close}}")
+alertcondition(shortSig, "SHORT: koniec korekty", "Fale 1m: SHORT {{ticker}} @ {{close}}")
+alertcondition(reachAvg, "Fala osiągnęła średnią", "Fale 1m: obecna fala osiągnęła średnią wielkość {{ticker}} @ {{close}}")
+
+if longSig or shortSig
+    alert((longSig ? "LONG " : "SHORT ") + syminfo.ticker + " @ " + str.tostring(entryPx, format.mintick) + " | TP " + str.tostring(tpPx, format.mintick) + " | SL " + str.tostring(slPx, format.mintick), alert.freq_once_per_bar_close)
+if reachAvg
+    alert("Fala " + (dir == 1 ? "w górę" : "w dół") + " osiągnęła średnią (" + str.tostring(curLeg, "#.#") + " pkt) " + syminfo.ticker, alert.freq_once_per_bar_close)
