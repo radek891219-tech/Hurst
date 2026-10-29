@@ -6,7 +6,7 @@ Dwa skrypty:
 |---|---|
 | `HurstBands_1m.pine` | Pasma Hursta LazyBeara na wykresie + wykładnik Hursta (reżim rynku) + filtr wyższego TF + sygnały + alerty + tabela |
 | `HurstOscillator_1m.pine` | Oscylator Hursta LazyBeara w osobnym panelu (te same poziomy co pasma) |
-| `HurstWaves_1m.pine` | Miernik fal: średnia/mediana ostatnich N fal w górę i w dół (pkt, $, świece), postęp obecnej fali, prognoza, wejście na końcu typowej korekty |
+| `HurstWaves_1m.pine` | Miernik fal: średnia/mediana ostatnich N fal w górę i w dół (pkt, $, świece), postęp obecnej fali, prognoza, wejście na końcu typowej korekty; filtry cofnięcia, wolumenu (świeca wejścia, kulminacja, siła fal) i VWAP |
 | `HurstScalper_1m.pine` | Szybki scalper na MNQ/NQ: wejścia z trendem i z odbicia wg reżimu Hursta, TP/SL w $, symulacja wyników po kosztach, dzienny limit |
 
 ## Instalacja
