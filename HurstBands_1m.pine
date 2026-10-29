@@ -1,5 +1,6 @@
 // This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // Hurst Bands [LazyBear] – wersja rozszerzona pod interwał 1m (ustawienia pod Nasdaq: NQ / MNQ / NAS100)
+//  • dane z wybranego interwału (np. pasma z 5m na wykresie 1m), bez repaintu
 //  • oryginalna logika LazyBear (wycentrowana MA przesunięta o length/2+1)
 //  • szerokość pasm w ATR (domyślnie) albo w % jak w oryginale
 //  • wykładnik Hursta (R/S z korektą Anisa-Lloyda) jako filtr reżimu rynku
@@ -7,10 +8,12 @@
 //  • filtr sesji nowojorskiej (domyślnie 09:35–15:55 czasu NY)
 //  • sygnały tylko na zamkniętych świecach, cooldown, alerty, tabela informacyjna
 //@version=5
-indicator("Hurst Bands 1m [LazyBear mod]", shorttitle="HurstLB 1m", overlay=true, max_bars_back=500, max_labels_count=500)
+indicator("Hurst Bands MTF [LazyBear mod]", shorttitle="HurstLB MTF", overlay=true, max_bars_back=500, max_labels_count=500)
 
 // ───────────────────────── Ustawienia ─────────────────────────
 grpB = "Pasma Hursta (LazyBear)"
+dataTf    = input.timeframe("", "Interwał danych (puste = wykres)", group=grpB, tooltip="Z tego interwału liczone są pasma i wykładnik Hursta. Np. 5 = pasma z 5m rysowane na wykresie 1m. Musi być równy lub wyższy niż interwał wykresu.")
+noRepaint = input.bool(true, "Bez repaintu (tylko zamknięte świece z wyższego TF)", group=grpB, tooltip="Wyłączone: pasma reagują od razu, ale mogą się zmieniać, dopóki świeca wyższego TF się nie zamknie.")
 src       = input.source(hl2, "Źródło", group=grpB)
 length    = input.int(10, "Długość CMA", minval=2, group=grpB)
 bandMode  = input.string("ATR", "Szerokość pasm", options=["ATR", "Procent (oryginał LB)"], group=grpB)
@@ -43,17 +46,9 @@ showTbl   = input.bool(true, "Pokaż tabelę", group=grpF)
 // ───────────────────────── Pasma Hursta (LazyBear) ─────────────────────────
 disp   = math.floor(length / 2) + 1
 dPrice = src[disp]
-cma    = ta.sma(dPrice, length)
+cmaC   = ta.sma(dPrice, length)
 atr    = ta.atr(atrLen)
 
-unitW(v) => bandMode == "ATR" ? v * atr : cma * v / 100
-
-upInner = cma + unitW(innerVal)
-loInner = cma - unitW(innerVal)
-upOuter = cma + unitW(outerVal)
-loOuter = cma - unitW(outerVal)
-upExt   = cma + unitW(extremeV)
-loExt   = cma - unitW(extremeV)
 
 // ───────────────────────── Wykładnik Hursta (R/S) ─────────────────────────
 ret = math.log(close / close[1])
@@ -108,7 +103,28 @@ slope = ((x1 - xm) * (y1 - ym) + (x2 - xm) * (y2 - ym) + (x3 - xm) * (y3 - ym) +
 // Kalibracja empiryczna (symulacja Monte Carlo): dla błądzenia losowego H ≈ 0.50
 hBias    = hWin == 64 ? 0.064 : hWin == 128 ? 0.030 : 0.010
 hurstRaw = bar_index > hWin ? 0.5 + slope + hBias : na
-hurst    = ta.ema(hurstRaw, hSmooth)
+hurstC   = ta.ema(hurstRaw, hSmooth)
+
+// ───────────────────────── Interwał danych ─────────────────────────
+// Bez repaintu: bierzemy wartości z ostatniej ZAMKNIĘTEJ świecy wybranego interwału
+unitC = bandMode == "ATR" ? atr : cmaC / 100
+off   = noRepaint ? 1 : 0
+[cmaR, unitR, hurstR] = request.security(syminfo.tickerid, dataTf, [cmaC[off], unitC[off], hurstC[off]], lookahead = noRepaint ? barmerge.lookahead_on : barmerge.lookahead_off)
+isChartTf = dataTf == "" or timeframe.in_seconds(dataTf) == timeframe.in_seconds()
+if not isChartTf and timeframe.in_seconds(dataTf) < timeframe.in_seconds()
+    runtime.error("Interwał danych musi być taki sam albo wyższy niż interwał wykresu.")
+cma   = isChartTf ? cmaC : cmaR
+unit  = isChartTf ? unitC : unitR
+hurst = isChartTf ? hurstC : hurstR
+
+unitW(v) => v * unit
+
+upInner = cma + unitW(innerVal)
+loInner = cma - unitW(innerVal)
+upOuter = cma + unitW(outerVal)
+loOuter = cma - unitW(outerVal)
+upExt   = cma + unitW(extremeV)
+loExt   = cma - unitW(extremeV)
 
 isMR    = hurst < hMR
 isTrend = hurst > hTR
@@ -170,11 +186,11 @@ plotshape(boLong,  "BO Long",  shape.labelup,      location.belowbar, color.new(
 plotshape(boShort, "BO Short", shape.labeldown,    location.abovebar, color.new(color.maroon, 0), text="BO", textcolor=color.white, size=size.small)
 
 // ───────────────────────── Tabela ─────────────────────────
-var table tbl = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 20), border_width=1)
+var table tbl = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 20), border_width=1)
 if showTbl and barstate.islast
     regTxt = isTrend ? "TREND" : isMR ? "POWRÓT DO ŚREDNIEJ" : "NEUTRALNY"
     regCol = isTrend ? color.blue : isMR ? color.purple : color.gray
-    distAtr = (close - cma) / atr
+    distAtr = (close - cma) / unit
     table.cell(tbl, 0, 0, "Hurst H", text_color=color.white)
     table.cell(tbl, 1, 0, str.tostring(hurst, "#.000"), text_color=color.white)
     table.cell(tbl, 0, 1, "Reżim", text_color=color.white)
@@ -182,7 +198,9 @@ if showTbl and barstate.islast
     table.cell(tbl, 0, 2, "Trend " + htfTf, text_color=color.white)
     table.cell(tbl, 1, 2, htfUp ? "W GÓRĘ" : "W DÓŁ", text_color=color.white, bgcolor=htfUp ? color.green : color.red)
     table.cell(tbl, 0, 3, "Odl. od CMA", text_color=color.white)
-    table.cell(tbl, 1, 3, str.tostring(distAtr, "#.00") + " ATR", text_color=color.white)
+    table.cell(tbl, 1, 3, str.tostring(distAtr, "#.00") + (bandMode == "ATR" ? " ATR" : " %"), text_color=color.white)
+    table.cell(tbl, 0, 5, "Interwał danych", text_color=color.white)
+    table.cell(tbl, 1, 5, isChartTf ? "wykres (" + timeframe.period + ")" : dataTf + (noRepaint ? " (zamknięte)" : " (na żywo)"), text_color=color.white)
     table.cell(tbl, 0, 4, "Sesja", text_color=color.white)
     table.cell(tbl, 1, 4, inSess ? "AKTYWNA" : "POZA SESJĄ", text_color=color.white, bgcolor=inSess ? color.green : color.gray)
 
