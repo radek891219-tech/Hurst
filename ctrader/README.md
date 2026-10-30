@@ -4,6 +4,7 @@
 |---|---|
 | `HTS_Strategy_Tester_FTMO.cs` | Kod bota HTS z wbudowaną ochroną FTMO i poprawkami błędów |
 | `FTMO_HTS_GER40.cash_m1_poprawione.cbotset` | Ustawienia z poprawkami (import w cTraderze) |
+| `HTS_ScaleIn_FTMO.cs` | Wersja HTS z uśrednianiem wejścia: kilka wejść, wspólny SL, stałe ryzyko kampanii |
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
 
 ## Ochrona FTMO (grupa `=== FTMO PROTECTION ===`)
@@ -27,3 +28,10 @@
 | StartHour / EndHour (UTC) | 2 / 22 | 7 / 15 |
 | WindowBlockHours | 2 | 1 |
 | EodCloseFriday | false | true |
+
+## HTS Scale-In (uśrednianie wejścia)
+- Sygnał jak w HTS. Na sygnale: wejście 1 po rynku, wejścia 2..N jako limity co `Step` % drogi do SL.
+- Wszystkie wejścia mają wspólny SL. Ryzyko kampanii dzielone jest między wejścia, więc strata przy pełnym wypełnieniu = `Campaign Risk`.
+- TP1 liczony od średniej ceny wejścia (R-krotność wypełnionego ryzyka albo stałe $). Na TP1: częściowe zamknięcie, kasowanie niewypełnionych limitów, SL reszty na średnią, trailing.
+- Niewypełnione limity kasowane po `Cancel Unfilled Entries After` świecach, poza oknem handlu i przy zmianie trendu.
+- FTMO: kampania startuje tylko, jeśli jej pełne ryzyko mieści się w dziennym limicie.
