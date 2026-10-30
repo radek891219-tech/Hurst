@@ -6,6 +6,8 @@
 //  • TP1 od średniej ceny: R-krotność wypełnionego ryzyka albo stałe $; na TP1 częściowe zamknięcie,
 //    kasowanie niewypełnionych limitów, SL reszty na średnią (BE), trailing w $
 //  • ochrona FTMO, okno handlu w UTC, zamykanie w piątek, symulacja wyników na historii
+//  • sygnały startu: Cross (przecięcie pasm) i Touch (dotknięcie pasma 33 na m1 z powrotem w trend)
+//  • do 10 wejść w kampanii
 // Wykres = interwał wejść (np. GER40 1m).
 //@version=5
 indicator("HTS Scale-In [uśrednianie, stałe ryzyko kampanii]", shorttitle="HTS SI", overlay=true, max_bars_back=2000, max_labels_count=500)
@@ -26,6 +28,9 @@ grpEN = "=== SYGNAŁ ==="
 trigMode    = input.string("MACross", "Entry Trigger", options=["MACross", "MA4Cross"], group=grpEN)
 minMaSpread = input.float(0.0, "Min MA4Cross Spread (pips)", minval=0, group=grpEN)
 minDist     = input.float(1.0, "Min Price Dist from Band (ticks)", minval=0, group=grpEN)
+useCross    = input.bool(true, "Sygnał: przecięcie pasm (Cross)", group=grpEN)
+useTouch    = input.bool(true, "Sygnał: dotknięcie pasma 33 na m1 (Touch)", group=grpEN, tooltip="Świeca dotyka szybkiego pasma na wykresie i zamyka się z powrotem w kierunku trendu, przy pasmach m1 ułożonych zgodnie z trendem.")
+needPb      = input.bool(true, "Wymagaj pullbacku na H1 przed pierwszym wejściem", group=grpEN, tooltip="Wyłącz, żeby kampanie startowały od razu po ustaleniu trendu na H1.")
 
 grpR = "=== STOP LOSS ==="
 pipSize   = input.float(1.0, "Pip size (jak w cTraderze)", minval=0.00001, group=grpR, tooltip="Sprawdź w cTraderze w informacjach o symbolu. Dla indeksów (GER40) zwykle 1.")
@@ -39,8 +44,8 @@ maxSLp    = input.float(250, "Max SL (pips, entry 1)", minval=0.1, group=grpR)
 
 grpSI = "=== SCALE-IN ==="
 campRisk   = input.float(300, "Campaign Risk ($, all entries filled)", minval=1, group=grpSI)
-nEntries   = input.int(3, "Number of Entries", minval=1, maxval=5, group=grpSI)
-stepPct    = input.float(25, "Step (% of SL distance)", minval=1, maxval=90, group=grpSI)
+nEntries   = input.int(5, "Number of Entries", minval=1, maxval=10, group=grpSI)
+stepPct    = input.float(15, "Step (% of SL distance)", minval=1, maxval=90, group=grpSI)
 riskSplit  = input.string("Equal", "Risk Split", options=["Equal", "Increasing", "Decreasing"], group=grpSI)
 minLvlSl   = input.float(15, "Min Dist Level→SL (pips)", minval=0.1, group=grpSI)
 expiryBars = input.int(60, "Cancel Unfilled Entries After (bars)", minval=1, group=grpSI)
@@ -68,7 +73,7 @@ ftmoOn     = input.bool(true, "Enable FTMO Protection", group=grpF)
 maxDayLoss = input.float(3000, "Max Daily Loss ($, 0 = off)", minval=0, group=grpF)
 needRoom   = input.bool(true, "Start Campaign Only If Full Risk Fits Daily Limit", group=grpF)
 dayTarget  = input.float(0, "Daily Profit Target ($, 0 = off)", minval=0, group=grpF)
-maxCamps   = input.int(3, "Max Campaigns per Day (0 = off)", minval=0, group=grpF)
+maxCamps   = input.int(6, "Max Campaigns per Day (0 = off)", minval=0, group=grpF)
 maxLosses  = input.int(2, "Max Losing Campaigns in a Row (0 = off)", minval=0, group=grpF)
 dayTz      = input.string("Europe/Prague", "Strefa czasowa resetu dnia", group=grpF)
 
@@ -126,8 +131,13 @@ trendNow = tFLc > tSHc ? 1 : tFHc < tSLc ? -1 : 0
 fMid     = (eFH + eFL) / 2
 sMid     = (eSH + eSL) / 2
 spreadOk = math.abs(fMid - sMid) / pipSize >= minMaSpread
-sigUp = spreadOk and (trigMode == "MACross" ? fMid[1] <= sMid[1] and fMid > sMid : eFL > eSH and eFL[1] <= eSH[1])
-sigDn = spreadOk and (trigMode == "MACross" ? fMid[1] >= sMid[1] and fMid < sMid : eFH < eSL and eFH[1] >= eSL[1])
+crossUp = spreadOk and (trigMode == "MACross" ? fMid[1] <= sMid[1] and fMid > sMid : eFL > eSH and eFL[1] <= eSH[1])
+crossDn = spreadOk and (trigMode == "MACross" ? fMid[1] >= sMid[1] and fMid < sMid : eFH < eSL and eFH[1] >= eSL[1])
+// Touch: korekta do szybkiego pasma m1 i zamknięcie z powrotem w kierunku trendu
+touchUp = fMid > sMid and low <= eFH and close > eFH and close > open
+touchDn = fMid < sMid and high >= eFL and close < eFL and close < open
+sigUp = (useCross and crossUp) or (useTouch and touchUp)
+sigDn = (useCross and crossDn) or (useTouch and touchDn)
 
 swLo = ta.lowest(low, swingBars)
 swHi = ta.highest(high, swingBars)
@@ -155,11 +165,11 @@ f_blockOk(int h) =>
 
 // ───────────────────────── Kampania ─────────────────────────
 // Wejście k: planowana cena, wielkość w $ na 1 punkt ceny, czy wypełnione, czy limit wciąż czeka, cena wypełnienia
-var array<float> lvPx    = array.new_float(5, na)
-var array<float> lvUsd   = array.new_float(5, 0.0)
-var array<bool>  lvFill  = array.new_bool(5, false)
-var array<bool>  lvLive  = array.new_bool(5, false)
-var array<float> lvEntry = array.new_float(5, na)
+var array<float> lvPx    = array.new_float(10, na)
+var array<float> lvUsd   = array.new_float(10, 0.0)
+var array<bool>  lvFill  = array.new_bool(10, false)
+var array<bool>  lvLive  = array.new_bool(10, false)
+var array<float> lvEntry = array.new_float(10, na)
 
 var bool  inCamp    = false
 var int   campN     = 0
@@ -178,7 +188,7 @@ f_agg() =>
     float V  = 0.0
     float s  = 0.0
     float fr = 0.0
-    for k = 0 to 4
+    for k = 0 to 9
         if k < campN and array.get(lvFill, k)
             u = array.get(lvUsd, k)
             e = array.get(lvEntry, k)
@@ -188,7 +198,7 @@ f_agg() =>
     [V, V > 0 ? s / V : na, fr]
 
 f_cancelPending() =>
-    for k = 0 to 4
+    for k = 0 to 9
         array.set(lvLive, k, false)
     true
 
@@ -211,16 +221,14 @@ var float  grossW      = 0.0
 var float  grossL      = 0.0
 var float  netAll      = 0.0
 var float  worstDay    = 0.0
-var array<int> fillDist = array.new_int(5, 0)
+var array<int> fillDist = array.new_int(10, 0)
 
 // Zdarzenia świecy
 bool  evPb    = false
 bool  evStartL = false
 bool  evStartS = false
-float pxFill2 = na
-float pxFill3 = na
-float pxFill4 = na
-float pxFill5 = na
+bool  evTouch  = false
+float pxFill  = na
 float pxTp1   = na
 float pxSl    = na
 float pxWin   = na
@@ -242,12 +250,12 @@ if barstate.isconfirmed
     // ── trend ──
     if trendNow != trend
         trend    := trendNow
-        pullback := false
+        pullback := not needPb
         prevSig  := false
         if inCamp
             f_cancelPending()
         else
-            state := trend == 0 ? 0 : 1
+            state := trend == 0 ? 0 : needPb ? 1 : 2
 
     // ── zarządzanie kampanią ──
     bool  campClosed = false
@@ -269,7 +277,7 @@ if barstate.isconfirmed
 
         // wypełnienie limitów (przed sprawdzeniem SL – cena przechodzi przez poziom zanim dojdzie do SL)
         if not campClosed and not tp1Hit
-            for k = 1 to 4
+            for k = 1 to 9
                 if k < campN and array.get(lvLive, k)
                     lv = array.get(lvPx, k)
                     if campDir == 1 ? low <= lv : high >= lv
@@ -278,14 +286,9 @@ if barstate.isconfirmed
                         array.set(lvLive, k, false)
                         array.set(lvEntry, k, fp)
                         campFills += 1
-                        if k == 1
-                            pxFill2 := fp
-                        else if k == 2
-                            pxFill3 := fp
-                        else if k == 3
-                            pxFill4 := fp
-                        else
-                            pxFill5 := fp
+                        pxFill := fp
+                        if showLvl
+                            label.new(bar_index, fp, str.tostring(k + 1), style=label.style_label_left, color=color.new(color.yellow, 20), textcolor=color.black, size=size.tiny)
 
         // wspólny SL
         if not campClosed and (campDir == 1 ? low <= campSL : high >= campSL)
@@ -418,7 +421,7 @@ if barstate.isconfirmed
                 int n = 0
                 for k = 0 to nEntries - 1
                     lvk = k == 0 ? close : math.round_to_mintick(close - dir * d * stepPct * k / 100)
-                    if k > 0 and math.abs(lvk - slPx) / pipSize < minLvlSl
+                    if k > 0 and (k * stepPct >= 100 or math.abs(lvk - slPx) / pipSize < minLvlSl)
                         break
                     array.set(lvPx, k, lvk)
                     n += 1
@@ -426,7 +429,7 @@ if barstate.isconfirmed
                 float wSum = 0.0
                 for k = 0 to n - 1
                     wSum += riskSplit == "Equal" ? 1.0 : riskSplit == "Increasing" ? k + 1.0 : n - k * 1.0
-                for k = 0 to 4
+                for k = 0 to 9
                     if k < n
                         w = riskSplit == "Equal" ? 1.0 : riskSplit == "Increasing" ? k + 1.0 : n - k * 1.0
                         lvk = array.get(lvPx, k)
@@ -452,6 +455,7 @@ if barstate.isconfirmed
                 campsToday += 1
                 evStartL  := dir == 1
                 evStartS  := dir == -1
+                evTouch   := not (useCross and (dir == 1 ? crossUp : crossDn))
 
 // ───────────────────────── Poziomy do rysowania ─────────────────────────
 f_pend(int k) =>
@@ -485,6 +489,11 @@ plot(showLvl ? f_pend(1) : na, "Limit 2", color=color.new(color.yellow, 20), sty
 plot(showLvl ? f_pend(2) : na, "Limit 3", color=color.new(color.yellow, 20), style=plot.style_circles)
 plot(showLvl ? f_pend(3) : na, "Limit 4", color=color.new(color.yellow, 20), style=plot.style_circles)
 plot(showLvl ? f_pend(4) : na, "Limit 5", color=color.new(color.yellow, 20), style=plot.style_circles)
+plot(showLvl ? f_pend(5) : na, "Limit 6", color=color.new(color.yellow, 20), style=plot.style_circles)
+plot(showLvl ? f_pend(6) : na, "Limit 7", color=color.new(color.yellow, 20), style=plot.style_circles)
+plot(showLvl ? f_pend(7) : na, "Limit 8", color=color.new(color.yellow, 20), style=plot.style_circles)
+plot(showLvl ? f_pend(8) : na, "Limit 9", color=color.new(color.yellow, 20), style=plot.style_circles)
+plot(showLvl ? f_pend(9) : na, "Limit 10", color=color.new(color.yellow, 20), style=plot.style_circles)
 plot(showLvl ? lvAvg : na, "Średnia cena", color=color.new(color.white, 0), style=plot.style_linebr, linewidth=2)
 plot(showLvl and inCamp ? campSL : na, "SL kampanii", color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
 plot(showLvl ? lvTp1 : na, "TP1", color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=2)
@@ -493,12 +502,10 @@ bgcolor(showBg and trend == 1 ? color.new(color.green, 94) : showBg and trend ==
 bgcolor(dayBlocked ? color.new(color.orange, 90) : na, title="Blokada FTMO")
 
 plotshape(evPb, "Pullback H1", shape.diamond, location.top, color.new(color.yellow, 0), text="PB", textcolor=color.yellow, size=size.tiny)
-plotshape(evStartL, "Start kampanii long",  shape.labelup,   location.belowbar, color.new(color.lime, 0), text="1", textcolor=color.black, size=size.small)
-plotshape(evStartS, "Start kampanii short", shape.labeldown, location.abovebar, color.new(color.red, 0),  text="1", textcolor=color.white, size=size.small)
-plotshape(pxFill2, "Dokładka 2", shape.circle, location.absolute, color.new(color.yellow, 0), text="2", textcolor=color.yellow, size=size.tiny)
-plotshape(pxFill3, "Dokładka 3", shape.circle, location.absolute, color.new(color.yellow, 0), text="3", textcolor=color.yellow, size=size.tiny)
-plotshape(pxFill4, "Dokładka 4", shape.circle, location.absolute, color.new(color.yellow, 0), text="4", textcolor=color.yellow, size=size.tiny)
-plotshape(pxFill5, "Dokładka 5", shape.circle, location.absolute, color.new(color.yellow, 0), text="5", textcolor=color.yellow, size=size.tiny)
+plotshape(evStartL and not evTouch, "Start long (Cross)",  shape.labelup,   location.belowbar, color.new(color.lime, 0), text="X", textcolor=color.black, size=size.small)
+plotshape(evStartS and not evTouch, "Start short (Cross)", shape.labeldown, location.abovebar, color.new(color.red, 0),  text="X", textcolor=color.white, size=size.small)
+plotshape(evStartL and evTouch, "Start long (Touch)",  shape.labelup,   location.belowbar, color.new(color.teal, 0),   text="T", textcolor=color.white, size=size.small)
+plotshape(evStartS and evTouch, "Start short (Touch)", shape.labeldown, location.abovebar, color.new(color.maroon, 0), text="T", textcolor=color.white, size=size.small)
 plotshape(pxTp1, "TP1",          shape.diamond, location.absolute, color.new(color.lime, 0),  size=size.small)
 plotshape(pxWin, "Wyjście z zyskiem / BE", shape.flag, location.absolute, color.new(color.green, 0), size=size.tiny)
 plotshape(pxSl,  "SL kampanii",  shape.xcross, location.absolute, color.new(color.red, 0),   size=size.small)
@@ -517,7 +524,7 @@ if showTbl and barstate.islast
         [V, avg, fr] = f_agg()
         op := V * remFrac * (close - avg) * campDir
         int waiting = 0
-        for k = 1 to 4
+        for k = 1 to 9
             if k < campN and array.get(lvLive, k)
                 waiting += 1
         campTxt := str.tostring(campFills) + " wypełn. / " + str.tostring(waiting) + " czeka | ryzyko " + str.tostring(fr, "#") + " $" + (tp1Hit ? " | po TP1" : "")
@@ -561,13 +568,13 @@ if showTbl and barstate.islast
 // ───────────────────────── Alerty ─────────────────────────
 alertcondition(evStartL, "HTS SI start LONG", "HTS Scale-In: start kampanii LONG {{ticker}} @ {{close}}")
 alertcondition(evStartS, "HTS SI start SHORT", "HTS Scale-In: start kampanii SHORT {{ticker}} @ {{close}}")
-alertcondition(not na(pxFill2) or not na(pxFill3) or not na(pxFill4) or not na(pxFill5), "HTS SI dokładka", "HTS Scale-In: dokładka wypełniona {{ticker}} @ {{close}}")
+alertcondition(not na(pxFill), "HTS SI dokładka", "HTS Scale-In: dokładka wypełniona {{ticker}} @ {{close}}")
 alertcondition(not na(pxTp1), "HTS SI TP1", "HTS Scale-In: TP1 {{ticker}} @ {{close}}")
 alertcondition(not na(pxSl) or not na(pxWin) or not na(pxEod), "HTS SI koniec kampanii", "HTS Scale-In: kampania zamknięta {{ticker}} @ {{close}}")
 
 if evStartL or evStartS
-    msg = "HTS SI " + (evStartL ? "LONG " : "SHORT ") + syminfo.ticker + " | wejście 1 @ " + str.tostring(array.get(lvPx, 0), format.mintick)
-    for k = 1 to 4
+    msg = "HTS SI " + (evStartL ? "LONG " : "SHORT ") + (evTouch ? "(Touch) " : "(Cross) ") + syminfo.ticker + " | wejście 1 @ " + str.tostring(array.get(lvPx, 0), format.mintick)
+    for k = 1 to 9
         if k < campN
             msg += " | limit " + str.tostring(k + 1) + " @ " + str.tostring(array.get(lvPx, k), format.mintick)
     msg += " | SL " + str.tostring(campSL, format.mintick)

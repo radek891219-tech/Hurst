@@ -420,7 +420,7 @@ namespace cAlgo.Robots
             for (int k = 0; k < EntriesCount; k++)
             {
                 double level = k == 0 ? entry : Math.Round(entry - sign * dist * StepPct * k / 100.0, Symbol.Digits);
-                if (k > 0 && Math.Abs(level - sl) / Symbol.PipSize < MinLevelSlPips) break;
+                if (k > 0 && (k * StepPct >= 100.0 || Math.Abs(level - sl) / Symbol.PipSize < MinLevelSlPips)) break;
                 levels.Add(level);
                 weights.Add(RiskSplit == SiWeights.Equal ? 1.0 : RiskSplit == SiWeights.Increasing ? k + 1 : EntriesCount - k);
             }
