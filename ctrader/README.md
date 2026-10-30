@@ -5,6 +5,8 @@
 | `HTS_Strategy_Tester_FTMO.cs` | Kod bota HTS z wbudowaną ochroną FTMO i poprawkami błędów |
 | `FTMO_HTS_GER40.cash_m1_poprawione.cbotset` | Ustawienia z poprawkami (import w cTraderze) |
 | `HTS_ScaleIn_FTMO.cs` | Wersja HTS z uśrednianiem wejścia: kilka wejść, wspólny SL, stałe ryzyko kampanii |
+| `HTS_Hurst_Signals_Indicator.cs` | Wskaźnik HTS + Hurst: wstęgi, pasma Hursta i strzałki sygnałów (rozchodzące się wstęgi + dotknięcie pasma) |
+| `HTS_Hurst_Bot.cs` | cBot grający sygnały HTS + Hurst – do backtestu (ryzyko w $, SL za pasmem ekstremalnym, TP w R, FTMO) |
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
 
 ## Ochrona FTMO (grupa `=== FTMO PROTECTION ===`)
