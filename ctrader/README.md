@@ -2,22 +2,28 @@
 
 | Plik | Co to jest |
 |---|---|
-| `FTMO_HTS_GER40.cash_m1_poprawione.cbotset` | Ustawienia HTS z poprawkami (import w cTraderze) |
-| `FtmoGuard.cs` | Osobny cBot-strażnik limitów FTMO, działa obok HTS |
+| `HTS_Strategy_Tester_FTMO.cs` | Kod bota HTS z wbudowaną ochroną FTMO i poprawkami błędów |
+| `FTMO_HTS_GER40.cash_m1_poprawione.cbotset` | Ustawienia z poprawkami (import w cTraderze) |
+| `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
 
-## Zmiany w ustawieniach HTS
-| Parametr | Było | Jest | Dlaczego |
-|---|---|---|---|
-| RiskCash | 970 | 500 | 5 strat z rzędu przy 970 $ to prawie cały dzienny limit FTMO na koncie 100k |
-| StartHour / EndHour (UTC) | 2 / 22 | 7 / 15 | Handel w głównej sesji DAX zamiast nocnego szumu i szerszego spreadu |
-| WindowBlockHours | 2 | 1 | Przy krótszym oknie ostatnie wejścia do 14:00 UTC |
-| EodCloseFriday | false | true | Bez trzymania pozycji przez weekend (wymóg konta FTMO typu Normal) |
+## Ochrona FTMO (grupa `=== FTMO PROTECTION ===`)
+- **Max Daily Loss** – dzienny wynik = equity minus saldo z północy CET/CEST (jak liczy FTMO). Po przekroczeniu: zamknięcie pozycji bota i blokada wejść do końca dnia.
+- **Daily Profit Target** – po osiągnięciu blokada wejść (pozycje zostają).
+- **Max Trades per Day**, **Max Consecutive Losses per Day** – blokada wejść do końca dnia.
+- Działa też w backteście.
 
-Reszta bez zmian. Trailing (15 $ / 15 $) zostawiony – trzeba sprawdzić w backteście, czy nie zamyka pozycji tuż po wejściu.
+## Poprawione błędy
+- Zawieszenie w stanie „CAMPAIGN ACTIVE”: gdy trend na H1 zmienił się w trakcie pozycji, a pozycja zamknęła się na SL po stronie serwera, bot nie otwierał już żadnych transakcji do restartu.
+- Zawieszenie, gdy wejście cross się nie otworzyło (np. za mały wolumen), a wejścia touch są wyłączone.
+- Pozycja bez SL: SL ustawiany był po otwarciu i błąd był ignorowany. Teraz taka pozycja jest od razu zamykana.
+- „Close EOD on FRIDAY” zamykał pozycje w piątek o 00:00 UTC (poza oknem), a nie po końcu okna.
+- Ręczna pozycja bez etykiety na tym samym symbolu wywracała bota (NullReferenceException).
+- Po restarcie bota pozostałe 5% po TP1 nie było rozpoznawane jako „po TP1”, więc trailing się nie włączał.
 
-## FTMO Guard
-- Liczy dzienny wynik jak FTMO: equity minus saldo z północy czasu CET/CEST.
-- Po przekroczeniu limitu straty zamyka pozycje i natychmiast zamyka każdą nową pozycję do końca dnia.
-- Opcjonalnie: dzienny cel, limit transakcji dziennie, limit strat z rzędu, zamknięcie w piątek.
-- Pilnuje pozycji z etykietą zawierającą `HTS_for_FTMO` (parametr do zmiany).
-- Działa na koncie demo/live. W backteście cTradera chodzi tylko jeden bot, więc tam limitu nie ma.
+## Zmiany w ustawieniach
+| Parametr | Było | Jest |
+|---|---|---|
+| RiskCash | 970 | 500 |
+| StartHour / EndHour (UTC) | 2 / 22 | 7 / 15 |
+| WindowBlockHours | 2 | 1 |
+| EodCloseFriday | false | true |

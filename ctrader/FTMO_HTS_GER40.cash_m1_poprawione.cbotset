@@ -44,6 +44,14 @@
     "EodCloseFriday": true,
     "EodMoveBe": false,
     "EnableLogs": false,
-    "EnableDashboard": true
+    "EnableDashboard": true,
+    "FtmoProtection": true,
+    "MaxDailyLossCash": 3000.0,
+    "DailyTargetCash": 0.0,
+    "MaxTradesPerDay": 4,
+    "MaxConsecLosses": 3,
+    "CloseOnDailyLoss": true,
+    "CloseAllOnDailyLoss": false,
+    "DayResetTimeZone": "Central European Standard Time"
   }
 }
