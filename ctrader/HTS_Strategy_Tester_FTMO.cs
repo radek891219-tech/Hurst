@@ -81,6 +81,9 @@ namespace cAlgo.Robots
         [Parameter("Entry Trigger", DefaultValue = EntryTriggerMode.MACross, Group = "=== ENTRY ===")]
         public EntryTriggerMode EntryTrigger { get; set; }
 
+        [Parameter("Trade Direction (0=Both, 1=Long only, 2=Short only)", DefaultValue = 0, MinValue = 0, MaxValue = 2, Group = "=== ENTRY ===")]
+        public int TradeDirectionMode { get; set; }
+
         [Parameter("Max Broker Spread (points)", DefaultValue = 800, Group = "=== ENTRY ===")]
         public double MaxSpread { get; set; }
 
@@ -373,6 +376,8 @@ namespace cAlgo.Robots
         private void DoWaitEntry(bool isTradeTime, double spreadPoints)
         {
             if (_entryBars.OpenTimes.Last(0) == _lastEntryBarTime) return;
+            if (TradeDirectionMode == 1 && _trend == TrendDir.Down) return;
+            if (TradeDirectionMode == 2 && _trend == TrendDir.Up) return;
 
             bool signal = EvaluateEntrySignal();
 
