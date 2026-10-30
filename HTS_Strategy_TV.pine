@@ -1,0 +1,584 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// HTS Strategy – wizualizacja cBota HTS_Strategy_Tester (cTrader) na TradingView
+//  • pasma 33/144 z High i Low na interwale trendu (H1) i na interwale wykresu (wejścia, m1)
+//  • trend: szybkie pasmo całe nad/pod wolnym na zamkniętej świecy H1
+//  • pullback: świeca H1 dotyka szybkiego pasma, potem czekamy na przecięcie pasm na m1
+//  • wejścia: Cross (MACross / MA4Cross) + opcjonalnie Touch 33 / Touch 144 w kampanii
+//  • SL: Percent / Swing / BandWidth144, wielkość pozycji z ryzyka w $, TP1 w $ z częściowym zamknięciem
+//  • po TP1: SL na BE, trailing w $ albo po paśmie MA
+//  • okno handlu w UTC, zamykanie EOD / w piątek, ochrona FTMO (dzienny limit, transakcje, serie strat)
+//  • symulacja wyników na historii (bez spreadu – patrz parametr kosztu)
+// Logika odpowiada wersji HTS_Strategy_Tester_FTMO.cs (z poprawkami). Wykres = interwał wejść (np. 1m).
+//@version=5
+indicator("HTS Strategy [cTrader HTS → TradingView]", shorttitle="HTS", overlay=true, max_bars_back=2000, max_labels_count=500)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpTF = "=== INTERWAŁY ==="
+trendTf  = input.timeframe("60", "Trend TF", group=grpTF, tooltip="Interwał trendu. Interwał wejść = interwał wykresu (w bocie Entry TF = m1).")
+
+grpTB = "=== TREND TF BANDS ==="
+tFast = input.int(33, "Trend Fast Period", minval=2, group=grpTB)
+tSlow = input.int(144, "Trend Slow Period", minval=2, group=grpTB)
+tType = input.string("Wilder", "Trend MA Type", options=["Wilder", "EMA", "SMA"], group=grpTB)
+
+grpEB = "=== ENTRY TF BANDS ==="
+eFast       = input.int(33, "Entry Fast Period", minval=2, group=grpEB)
+eSlow       = input.int(144, "Entry Slow Period", minval=2, group=grpEB)
+eType       = input.string("Wilder", "Entry MA Type", options=["Wilder", "EMA", "SMA"], group=grpEB)
+minMaSpread = input.float(0.0, "Min MA4Cross Spread (pips)", minval=0, group=grpEB)
+
+grpEN = "=== ENTRY ==="
+enCross  = input.bool(true, "Enable Cross Position", group=grpEN)
+enT33    = input.bool(false, "Enable Touch Fast (33)", group=grpEN)
+enT144   = input.bool(false, "Enable Touch Slow (144)", group=grpEN)
+trigMode = input.string("MACross", "Entry Trigger", options=["MACross", "MA4Cross"], group=grpEN)
+minDist  = input.float(1.0, "Min Price Dist from Band (ticks - CROSS)", minval=0, group=grpEN)
+
+grpR = "=== RISK & SL ($) ==="
+riskCash  = input.float(500, "Risk per Trade ($)", minval=1, group=grpR)
+pipSize   = input.float(1.0, "Pip size (jak w cTraderze)", minval=0.00001, group=grpR, tooltip="Sprawdź w cTraderze w informacjach o symbolu. Dla indeksów (GER40) zwykle 1.")
+minSLp    = input.float(40, "Min SL (pips)", minval=0.1, group=grpR)
+maxSLp    = input.float(250, "Max SL (pips)", minval=0.1, group=grpR)
+slMode    = input.string("Percent", "SL Calculation Mode", options=["Swing", "BandWidth144", "Percent"], group=grpR)
+slPct     = input.float(0.5, "SL % from Entry Price (If Percent)", minval=0.01, step=0.05, group=grpR)
+swingBars = input.int(26, "Bars for Swing SL", minval=2, group=grpR)
+swingBuf  = input.float(15, "Swing SL Buffer (pips)", minval=0, group=grpR)
+bwMult    = input.float(2.0, "SL Multiplier 144", minval=0.1, step=0.1, group=grpR)
+
+grpPM = "=== POSITION MANAGEMENT ($) ==="
+tp1Cash   = input.float(800, "Take Profit 1 ($)", minval=1, group=grpPM)
+partPct   = input.float(95, "% Volume to Close at TP1", minval=1, maxval=100, group=grpPM)
+trailOn   = input.bool(true, "Trailing Stop Active", group=grpPM)
+trailMode = input.string("CashDistance", "Trailing Mode", options=["CashDistance", "MATrailing"], group=grpPM)
+maLine    = input.string("SlowHighLow", "MA Trailing Line (if MA)", options=["FastLowHigh", "SlowHighLow", "SlowLowHigh"], group=grpPM)
+trStart   = input.float(15, "Trailing Start Profit ($) [Cash]", minval=1, group=grpPM)
+trDist    = input.float(15, "Trailing Distance ($) [Cash]", minval=1, group=grpPM)
+trBuf     = input.float(15, "Trailing Buffer (pips) [MA]", minval=0.1, group=grpPM)
+manualTp2 = input.bool(false, "Manual TP2 (disables touch exit) [MA]", group=grpPM)
+costCash  = input.float(0, "Koszt na pozycję ($: spread + prowizja)", minval=0, group=grpPM, tooltip="TradingView nie zna spreadu brokera – wpisz średni koszt jednej pozycji, żeby wynik był realny.")
+
+grpW = "=== TRADING WINDOW (UTC) ==="
+startH = input.int(7, "Start Hour", minval=0, maxval=23, group=grpW)
+endH   = input.int(15, "End Hour", minval=0, maxval=23, group=grpW)
+blockH = input.int(1, "Block entries N hours before window ends", minval=0, group=grpW)
+eodEv  = input.bool(false, "Close EOD Everyday", group=grpW)
+eodFri = input.bool(true, "Close EOD on FRIDAY", group=grpW)
+eodBe  = input.bool(false, "EOD Move SL to BE (if in profit)", group=grpW)
+
+grpF = "=== FTMO PROTECTION ==="
+ftmoOn     = input.bool(true, "Enable FTMO Protection", group=grpF)
+maxDayLoss = input.float(3000, "Max Daily Loss ($, 0 = off)", minval=0, group=grpF)
+dayTarget  = input.float(0, "Daily Profit Target ($, 0 = off)", minval=0, group=grpF)
+maxTrades  = input.int(4, "Max Trades per Day (0 = off)", minval=0, group=grpF)
+maxLosses  = input.int(3, "Max Consecutive Losses per Day (0 = off)", minval=0, group=grpF)
+closeOnDL  = input.bool(true, "Close Bot Positions on Daily Loss", group=grpF)
+dayTz      = input.string("Europe/Prague", "Strefa czasowa resetu dnia", group=grpF)
+
+grpV = "=== WYGLĄD ==="
+showHtf = input.bool(true, "Pasma Trend TF (H1)", group=grpV)
+showLtf = input.bool(true, "Pasma Entry TF (wykres)", group=grpV)
+showBg  = input.bool(true, "Tło wg trendu", group=grpV)
+showLvl = input.bool(true, "Linie Entry / SL / TP1", group=grpV)
+showTbl = input.bool(true, "Tabela", group=grpV)
+
+// ───────────────────────── Średnie ─────────────────────────
+f_ma(float src, simple int n, simple string t) =>
+    float r = ta.rma(src, n)
+    float e = ta.ema(src, n)
+    float s = ta.sma(src, n)
+    t == "Wilder" ? r : t == "EMA" ? e : s
+
+// Pasma Entry TF (wykres)
+eFH = f_ma(high, eFast, eType)
+eFL = f_ma(low,  eFast, eType)
+eSH = f_ma(high, eSlow, eType)
+eSL = f_ma(low,  eSlow, eType)
+
+// Pasma Trend TF – wartości z ostatniej ZAMKNIĘTEJ świecy (jak Last(1) w bocie)
+htFH = f_ma(high, tFast, tType)
+htFL = f_ma(low,  tFast, tType)
+htSH = f_ma(high, tSlow, tType)
+htSL = f_ma(low,  tSlow, tType)
+sFH  = math.sum(high, tFast - 1)
+sFL  = math.sum(low,  tFast - 1)
+sSH  = math.sum(high, tSlow - 1)
+sSL  = math.sum(low,  tSlow - 1)
+[tFHc, tFLc, tSHc, tSLc, tHc, tLc, tsFH, tsFL, tsSH, tsSL, tOpen] = request.security(syminfo.tickerid, trendTf,
+     [htFH[1], htFL[1], htSH[1], htSL[1], high[1], low[1], sFH[1], sFL[1], sSH[1], sSL[1], time], lookahead=barmerge.lookahead_on)
+
+if timeframe.in_seconds(trendTf) < timeframe.in_seconds()
+    runtime.error("Trend TF musi być wyższy lub równy interwałowi wykresu.")
+
+// Bieżąca (rozwijająca się) wartość pasm Trend TF – jak Last(0) w bocie, bez repaintu
+htfNew = ta.change(tOpen) != 0
+var float runHi = na
+var float runLo = na
+runHi := htfNew or na(runHi) ? high : math.max(runHi, high)
+runLo := htfNew or na(runLo) ? low : math.min(runLo, low)
+
+f_dev(float prevMa, float prevSum, float cur, simple int n, simple string t) =>
+    t == "Wilder" ? prevMa + (cur - prevMa) / n : t == "EMA" ? prevMa + (cur - prevMa) * 2.0 / (n + 1) : (prevSum + cur) / n
+
+tFH0 = f_dev(tFHc, tsFH, runHi, tFast, tType)
+tFL0 = f_dev(tFLc, tsFL, runLo, tFast, tType)
+tSH0 = f_dev(tSHc, tsSH, runHi, tSlow, tType)
+tSL0 = f_dev(tSLc, tsSL, runLo, tSlow, tType)
+
+trendNow = tFLc > tSHc ? 1 : tFHc < tSLc ? -1 : 0
+
+// ───────────────────────── Sygnał wejścia (zamknięta świeca) ─────────────────────────
+fMid     = (eFH + eFL) / 2
+sMid     = (eSH + eSL) / 2
+spreadOk = math.abs(fMid - sMid) / pipSize >= minMaSpread
+upM  = fMid[1] <= sMid[1] and fMid > sMid
+dnM  = fMid[1] >= sMid[1] and fMid < sMid
+up4  = eFL > eSH and eFL[1] <= eSH[1]
+dn4  = eFH < eSL and eFH[1] >= eSL[1]
+sigUp = spreadOk and (trigMode == "MACross" ? upM : up4)
+sigDn = spreadOk and (trigMode == "MACross" ? dnM : dn4)
+
+swLo = ta.lowest(low, swingBars)
+swHi = ta.highest(high, swingBars)
+
+f_slPrice(int dir, float entry) =>
+    float r = na
+    if slMode == "Percent"
+        r := entry - dir * entry * slPct / 100
+    else if slMode == "Swing"
+        r := dir == 1 ? swLo - swingBuf * pipSize : swHi + swingBuf * pipSize
+    else
+        bw = eSH - eSL
+        r := bw > 0 ? (dir == 1 ? eSH - bw * bwMult : eSL + bw * bwMult) : na
+    math.round_to_mintick(r)
+
+f_inWin(int h) =>
+    startH == endH ? true : startH < endH ? (h >= startH and h < endH) : (h >= startH or h < endH)
+
+f_blockOk(int h) =>
+    bool ok = true
+    if blockH > 0 and startH != endH
+        int rem = startH < endH ? endH - h : h >= startH ? (24 - h) + endH : endH - h
+        ok := rem > blockH
+    ok
+
+f_ref(int dir) =>
+    maLine == "FastLowHigh" ? (dir == 1 ? eFL : eFH) : maLine == "SlowHighLow" ? (dir == 1 ? eSH : eSL) : (dir == 1 ? eSL : eSH)
+
+// ───────────────────────── Pozycje ─────────────────────────
+type Pos
+    int    dir
+    string kind
+    float  entry
+    float  sl
+    float  tp1
+    float  slDist
+    float  vol      = 1.0
+    bool   tp1Hit   = false
+    bool   trailAct = false
+    bool   beDone   = false
+    float  maxFav
+    float  realized = 0.0
+
+f_open(int dir, string kind, float entry, float sl) =>
+    float d = math.abs(entry - sl)
+    bool ok = not na(sl) and d > 0 and (dir == 1 ? sl < entry : sl > entry) and d / pipSize >= minSLp and d / pipSize <= maxSLp
+    Pos res = na
+    if ok
+        res := Pos.new(dir=dir, kind=kind, entry=entry, sl=sl, tp1=math.round_to_mintick(entry + dir * d * tp1Cash / riskCash), slDist=d, maxFav=entry)
+    res
+
+f_has(array<Pos> b, string k) =>
+    bool r = false
+    if array.size(b) > 0
+        for i = 0 to array.size(b) - 1
+            if array.get(b, i).kind == k
+                r := true
+    r
+
+var array<Pos> book = array.new<Pos>()
+
+// Stan bota: 0 WaitTrend, 1 WaitPullback, 2 WaitEntry, 3 InCampaign
+var int   trend     = 0
+var int   state     = 0
+var bool  pullback  = false
+var bool  prevSig   = false
+var int   lastPbHtf = na
+var int   campDir   = 0
+var float campSL    = na
+var bool  campCross = false
+var bool  t33Used   = false
+var bool  t144Used  = false
+var bool  campHad   = false
+
+// FTMO i statystyki
+var float dayRealized = 0.0
+var int   tradesToday = 0
+var int   consec      = 0
+var bool  dayBlocked  = false
+var string blockWhy   = ""
+var int   nTrades     = 0
+var int   nWins       = 0
+var float grossW      = 0.0
+var float grossL      = 0.0
+var float netAll      = 0.0
+var float worstDay    = 0.0
+var int   nBlockedDays = 0
+
+// Zdarzenia tej świecy (do znaczników)
+bool  evPb    = false
+bool  evXL    = false
+bool  evXS    = false
+bool  evTL    = false
+bool  evTS    = false
+float pxTp1   = na
+float pxSl    = na
+float pxWin   = na
+float pxEod   = na
+bool  evBlock = false
+
+hOpen  = hour(time, "UTC")
+hEntry = hour(time_close, "UTC")
+newDay = dayofmonth(time, dayTz) != dayofmonth(time[1], dayTz)
+
+if barstate.isconfirmed
+    // ── nowy dzień (FTMO liczy od północy CET/CEST) ──
+    if newDay
+        dayRealized := 0.0
+        tradesToday := 0
+        consec      := 0
+        dayBlocked  := false
+        blockWhy    := ""
+
+    // ── trend (DoWaitTrend) ──
+    if trendNow != trend
+        trend     := trendNow
+        pullback  := false
+        prevSig   := false
+        campSL    := na
+        campCross := false
+        t33Used   := false
+        t144Used  := false
+        campHad   := false
+        if state != 3
+            state := trend == 0 ? 0 : 1
+
+    // ── zarządzanie pozycjami ──
+    bool outWin  = not f_inWin(hOpen)
+    bool isFri   = dayofweek(time, "UTC") == dayofweek.friday
+    bool afterEnd = startH < endH ? hOpen >= endH : true
+    if array.size(book) > 0
+        for i = array.size(book) - 1 to 0
+            Pos p = array.get(book, i)
+            bool  closed = false
+            float exitPx = na
+            int   why    = 0   // 1 = SL/BE, 2 = trailing/MA, 3 = EOD, 4 = TP1 100%
+            usdPerPt = riskCash / p.slDist
+
+            if outWin and (eodEv or (eodFri and isFri and afterEnd))
+                exitPx := open
+                closed := true
+                why    := 3
+            if not closed and outWin and eodBe and not p.trailAct and not p.beDone
+                inProfit = p.dir == 1 ? open > p.entry : open < p.entry
+                worse    = p.dir == 1 ? p.sl < p.entry : p.sl > p.entry
+                if inProfit and worse
+                    p.sl     := p.entry
+                    p.beDone := true
+
+            // SL po stronie serwera – sprawdzany pierwszy (wariant ostrożny)
+            if not closed and (p.dir == 1 ? low <= p.sl : high >= p.sl)
+                exitPx := p.dir == 1 ? math.min(open, p.sl) : math.max(open, p.sl)
+                closed := true
+                why    := p.tp1Hit ? 2 : 1
+
+            bool tpNow = false
+            if not closed and not p.tp1Hit and (p.dir == 1 ? high >= p.tp1 : low <= p.tp1)
+                if partPct < 100
+                    part = (p.tp1 - p.entry) * p.dir * usdPerPt * p.vol * partPct / 100
+                    p.realized := p.realized + part
+                    dayRealized += part
+                    p.vol    := p.vol * (1 - partPct / 100)
+                    p.tp1Hit := true
+                    p.sl     := p.entry
+                    pxTp1    := p.tp1
+                    tpNow    := true
+                else
+                    exitPx := p.tp1
+                    closed := true
+                    why    := 4
+                    pxTp1  := p.tp1
+
+            if not closed
+                p.maxFav := p.dir == 1 ? math.max(p.maxFav, high) : math.min(p.maxFav, low)
+
+            // trailing – tylko po TP1, od następnej świecy (bot wychodzi z funkcji po TP1)
+            if not closed and p.tp1Hit and trailOn and not tpNow
+                if trailMode == "CashDistance"
+                    startD = trStart / (usdPerPt * p.vol)
+                    distD  = trDist / (usdPerPt * p.vol)
+                    prof   = p.dir == 1 ? high - p.entry : p.entry - low
+                    if not p.trailAct and prof >= startD
+                        p.trailAct := true
+                    if p.trailAct
+                        newSl = math.round_to_mintick(p.maxFav - p.dir * distD)
+                        better = p.dir == 1 ? newSl > p.sl + pipSize : newSl < p.sl - pipSize
+                        valid  = p.dir == 1 ? newSl < close : newSl > close
+                        if better and valid
+                            p.sl := newSl
+                else
+                    if not p.trailAct and (p.dir == 1 ? fMid >= p.entry : fMid <= p.entry)
+                        p.trailAct := true
+                    if p.trailAct
+                        ref = f_ref(p.dir)
+                        if not manualTp2 and (p.dir == 1 ? low <= ref : high >= ref)
+                            exitPx := p.dir == 1 ? math.min(open, ref) : math.max(open, ref)
+                            closed := true
+                            why    := 2
+                        else
+                            newSl  = math.round_to_mintick(ref - p.dir * trBuf * pipSize)
+                            better = p.dir == 1 ? newSl > p.sl + pipSize : newSl < p.sl - pipSize
+                            valid  = p.dir == 1 ? newSl < close : newSl > close
+                            if better and valid
+                                p.sl := newSl
+
+            if closed
+                rest = (exitPx - p.entry) * p.dir * usdPerPt * p.vol
+                p.realized := p.realized + rest
+                dayRealized += rest - costCash
+                total = p.realized - costCash
+                nTrades += 1
+                netAll  += total
+                if total > 0
+                    nWins  += 1
+                    grossW += total
+                    consec := 0
+                else
+                    grossL -= total
+                    consec += 1
+                if why == 3
+                    pxEod := exitPx
+                else if why == 1
+                    pxSl := exitPx
+                else
+                    pxWin := exitPx
+                array.remove(book, i)
+                if ftmoOn and not dayBlocked and maxLosses > 0 and consec >= maxLosses
+                    dayBlocked := true
+                    blockWhy   := str.tostring(consec) + " straty z rzędu"
+                    evBlock    := true
+
+    // ── FTMO: dzienny wynik (zamknięte + otwarte na zamknięciu świecy) ──
+    float openPnl = 0.0
+    if array.size(book) > 0
+        for i = 0 to array.size(book) - 1
+            Pos q = array.get(book, i)
+            openPnl += (close - q.entry) * q.dir * (riskCash / q.slDist) * q.vol
+    dayPnl = dayRealized + openPnl
+    if ftmoOn and not dayBlocked and maxDayLoss > 0 and dayPnl <= -maxDayLoss
+        dayBlocked := true
+        blockWhy   := "limit straty " + str.tostring(dayPnl, "#") + " $"
+        evBlock    := true
+        if closeOnDL and array.size(book) > 0
+            for i = array.size(book) - 1 to 0
+                Pos q = array.get(book, i)
+                rest = (close - q.entry) * q.dir * (riskCash / q.slDist) * q.vol
+                q.realized := q.realized + rest
+                dayRealized += rest - costCash
+                total = q.realized - costCash
+                nTrades += 1
+                netAll  += total
+                if total > 0
+                    nWins  += 1
+                    grossW += total
+                else
+                    grossL -= total
+                pxSl := close
+                array.remove(book, i)
+    if ftmoOn and not dayBlocked and dayTarget > 0 and dayPnl >= dayTarget
+        dayBlocked := true
+        blockWhy   := "dzienny cel " + str.tostring(dayPnl, "#") + " $"
+        evBlock    := true
+    worstDay := math.min(worstDay, dayRealized + openPnl)
+
+    // ── kampania zakończona ──
+    if state == 3 and array.size(book) == 0 and (campHad or na(campSL))
+        campSL    := na
+        campCross := false
+        t33Used   := false
+        t144Used  := false
+        campHad   := false
+        state     := trend == 0 ? 0 : pullback ? 2 : 1
+        prevSig   := trend == 1 ? sigUp[1] : trend == -1 ? sigDn[1] : false
+
+    // ── pullback na Trend TF (DoWaitPullback) ──
+    if state == 1 and trend != 0 and (na(lastPbHtf) or tOpen != lastPbHtf)
+        touched = trend == 1 ? tLc <= tFHc : tHc >= tFLc
+        if touched
+            pullback := true
+            state    := 2
+            evPb     := true
+        lastPbHtf := tOpen
+
+    bool ftmoOk = not ftmoOn or (not dayBlocked and (maxTrades == 0 or tradesToday < maxTrades))
+    if ftmoOn and not dayBlocked and maxTrades > 0 and tradesToday >= maxTrades
+        dayBlocked := true
+        blockWhy   := str.tostring(tradesToday) + " transakcji dziś"
+
+    // ── wejście Cross (DoWaitEntry) ──
+    if state == 2 and trend != 0
+        sig = trend == 1 ? sigUp : sigDn
+        if not sig
+            prevSig := false
+        else if not prevSig and f_inWin(hEntry) and f_blockOk(hEntry)
+            prevSig := true
+            dir = trend
+            priceOk = dir == 1 ? close > tFH0 and (close - eFH) / syminfo.mintick >= minDist : close < tFL0 and (eFL - close) / syminfo.mintick >= minDist
+            if priceOk
+                slPx  = f_slPrice(dir, close)
+                probe = f_open(dir, "X", close, slPx)
+                if not na(probe)
+                    campDir   := dir
+                    campSL    := slPx
+                    campCross := true
+                    t33Used   := false
+                    t144Used  := false
+                    campHad   := false
+                    state     := 3
+                    bool opened = false
+                    if enCross and ftmoOk
+                        array.push(book, probe)
+                        tradesToday += 1
+                        campHad := true
+                        opened  := true
+                        evXL    := dir == 1
+                        evXS    := dir == -1
+                    if not opened and not enT33 and not enT144
+                        campSL    := na
+                        campCross := false
+                        state     := pullback ? 2 : 1
+                        prevSig   := true
+
+    // ── wejścia Touch w kampanii (DoCampaignTouchEntries) ──
+    if state == 3 and campCross and pullback and f_inWin(hOpen) and f_blockOk(hOpen) and ftmoOk
+        if enT33 and not t33Used and not f_has(book, "T33") and (campDir == 1 ? low <= eFH : high >= eFL)
+            px = campDir == 1 ? math.min(open, eFH) : math.max(open, eFL)
+            Pos t = f_open(campDir, "T33", math.round_to_mintick(px), campSL)
+            if not na(t)
+                array.push(book, t)
+                tradesToday += 1
+                campHad := true
+                t33Used := true
+                evTL    := campDir == 1
+                evTS    := campDir == -1
+        if enT144 and not t144Used and not f_has(book, "T144") and (campDir == 1 ? low <= eSH : high >= eSL)
+            px = campDir == 1 ? math.min(open, eSH) : math.max(open, eSL)
+            Pos t = f_open(campDir, "T144", math.round_to_mintick(px), campSL)
+            if not na(t)
+                array.push(book, t)
+                tradesToday += 1
+                campHad  := true
+                t144Used := true
+                evTL     := campDir == 1
+                evTS     := campDir == -1
+
+if newDay and barstate.isconfirmed and dayBlocked[1]
+    nBlockedDays += 1
+
+// Poziomy pierwszej otwartej pozycji
+float lvEntry = na
+float lvSl    = na
+float lvTp1   = na
+if array.size(book) > 0
+    Pos f = array.get(book, 0)
+    lvEntry := f.entry
+    lvSl    := f.sl
+    lvTp1   := f.tp1Hit ? na : f.tp1
+
+// ───────────────────────── Wykres ─────────────────────────
+pTFH = plot(showHtf ? tFH0 : na, "Trend Fast High", color=color.new(color.blue, 0), linewidth=2)
+pTFL = plot(showHtf ? tFL0 : na, "Trend Fast Low",  color=color.new(color.blue, 0), linewidth=2)
+pTSH = plot(showHtf ? tSH0 : na, "Trend Slow High", color=color.new(color.orange, 0), linewidth=2)
+pTSL = plot(showHtf ? tSL0 : na, "Trend Slow Low",  color=color.new(color.orange, 0), linewidth=2)
+fill(pTFH, pTFL, color=color.new(color.blue, 85), title="Trend Fast pasmo")
+fill(pTSH, pTSL, color=color.new(color.orange, 85), title="Trend Slow pasmo")
+
+pEFH = plot(showLtf ? eFH : na, "Entry Fast High", color=color.new(color.aqua, 30))
+pEFL = plot(showLtf ? eFL : na, "Entry Fast Low",  color=color.new(color.aqua, 30))
+pESH = plot(showLtf ? eSH : na, "Entry Slow High", color=color.new(color.fuchsia, 30))
+pESL = plot(showLtf ? eSL : na, "Entry Slow Low",  color=color.new(color.fuchsia, 30))
+fill(pEFH, pEFL, color=color.new(color.aqua, 90), title="Entry Fast pasmo")
+fill(pESH, pESL, color=color.new(color.fuchsia, 90), title="Entry Slow pasmo")
+
+plot(showLvl ? lvEntry : na, "Entry", color=color.new(color.gray, 0), style=plot.style_linebr)
+plot(showLvl ? lvSl : na,    "SL",    color=color.new(color.red, 0), style=plot.style_linebr, linewidth=2)
+plot(showLvl ? lvTp1 : na,   "TP1",   color=color.new(color.lime, 0), style=plot.style_linebr, linewidth=2)
+
+bgcolor(showBg and trend == 1 ? color.new(color.green, 94) : showBg and trend == -1 ? color.new(color.red, 94) : na, title="Trend H1")
+bgcolor(dayBlocked ? color.new(color.orange, 90) : na, title="Blokada FTMO")
+
+plotshape(evPb, "Pullback na Trend TF", shape.diamond, location.top, color.new(color.yellow, 0), text="PB", textcolor=color.yellow, size=size.tiny)
+plotshape(evXL, "Long Cross",  shape.labelup,   location.belowbar, color.new(color.lime, 0), text="X", textcolor=color.black, size=size.small)
+plotshape(evXS, "Short Cross", shape.labeldown, location.abovebar, color.new(color.red, 0),  text="X", textcolor=color.white, size=size.small)
+plotshape(evTL, "Long Touch",  shape.triangleup,   location.belowbar, color.new(color.green, 0),  text="T", textcolor=color.green,  size=size.tiny)
+plotshape(evTS, "Short Touch", shape.triangledown, location.abovebar, color.new(color.maroon, 0), text="T", textcolor=color.maroon, size=size.tiny)
+plotshape(pxTp1, "TP1",            shape.circle, location.absolute, color.new(color.lime, 0),   size=size.tiny)
+plotshape(pxWin, "Wyjście z zyskiem (trailing / MA)", shape.flag, location.absolute, color.new(color.green, 0), size=size.tiny)
+plotshape(pxSl,  "SL / BE",        shape.xcross, location.absolute, color.new(color.red, 0),    size=size.tiny)
+plotshape(pxEod, "Zamknięcie EOD", shape.square, location.absolute, color.new(color.gray, 0),   size=size.tiny)
+plotshape(evBlock, "Blokada FTMO", shape.labeldown, location.top, color.new(color.orange, 0), text="FTMO STOP", textcolor=color.black, size=size.small)
+
+// ───────────────────────── Tabela ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 15, bgcolor=color.new(color.black, 15), border_width=1)
+if showTbl and barstate.islast
+    stTxt = state == 0 ? "Czekam na trend" : state == 1 ? "Czekam na pullback H1" : state == 2 ? "Czekam na przecięcie pasm" : "KAMPANIA AKTYWNA"
+    trTxt = trend == 1 ? "W GÓRĘ" : trend == -1 ? "W DÓŁ" : "BRAK"
+    trCol = trend == 1 ? color.green : trend == -1 ? color.red : color.gray
+    float op = 0.0
+    if array.size(book) > 0
+        for i = 0 to array.size(book) - 1
+            Pos q = array.get(book, i)
+            op += (close - q.entry) * q.dir * (riskCash / q.slDist) * q.vol
+    dp      = dayRealized + op
+    winRate = nTrades > 0 ? 100.0 * nWins / nTrades : na
+    pf      = grossL > 0 ? grossW / grossL : na
+    beRate  = 100.0 * (riskCash + costCash) / (riskCash + tp1Cash)
+    table.cell(tbl, 0, 0, "Trend " + trendTf, text_color=color.white)
+    table.cell(tbl, 1, 0, trTxt, text_color=color.white, bgcolor=trCol)
+    table.cell(tbl, 0, 1, "Stan bota", text_color=color.white)
+    table.cell(tbl, 1, 1, stTxt, text_color=color.white, bgcolor=state == 3 ? color.blue : color.gray)
+    table.cell(tbl, 0, 2, "Pullback", text_color=color.white)
+    table.cell(tbl, 1, 2, pullback ? "TAK" : "NIE", text_color=color.white)
+    table.cell(tbl, 0, 3, "Pozycje", text_color=color.white)
+    table.cell(tbl, 1, 3, str.tostring(array.size(book)), text_color=color.white)
+    table.cell(tbl, 0, 4, "SL / TP1", text_color=color.white)
+    table.cell(tbl, 1, 4, na(lvSl) ? "–" : str.tostring(lvSl, format.mintick) + " / " + (na(lvTp1) ? "po TP1" : str.tostring(lvTp1, format.mintick)), text_color=color.white)
+    table.cell(tbl, 0, 5, "Dziś ($)", text_color=color.white)
+    table.cell(tbl, 1, 5, str.tostring(dp, "#.00") + (maxDayLoss > 0 ? "  (limit -" + str.tostring(maxDayLoss, "#") + ")" : ""), text_color=color.white, bgcolor=dp >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+    table.cell(tbl, 0, 6, "Transakcje dziś", text_color=color.white)
+    table.cell(tbl, 1, 6, str.tostring(tradesToday) + (maxTrades > 0 ? " / " + str.tostring(maxTrades) : ""), text_color=color.white)
+    table.cell(tbl, 0, 7, "Straty z rzędu", text_color=color.white)
+    table.cell(tbl, 1, 7, str.tostring(consec), text_color=color.white)
+    table.cell(tbl, 0, 8, "FTMO", text_color=color.white)
+    table.cell(tbl, 1, 8, not ftmoOn ? "WYŁ." : dayBlocked ? "STOP: " + blockWhy : "OK", text_color=color.white, bgcolor=dayBlocked ? color.orange : color.green)
+    table.cell(tbl, 0, 9, "Transakcje (historia)", text_color=color.white)
+    table.cell(tbl, 1, 9, str.tostring(nTrades), text_color=color.white)
+    table.cell(tbl, 0, 10, "Skuteczność", text_color=color.white)
+    table.cell(tbl, 1, 10, str.tostring(winRate, "#.0") + " %  (na zero: " + str.tostring(beRate, "#.0") + " %)", text_color=color.white)
+    table.cell(tbl, 0, 11, "Profit factor", text_color=color.white)
+    table.cell(tbl, 1, 11, str.tostring(pf, "#.00"), text_color=color.white)
+    table.cell(tbl, 0, 12, "Wynik netto ($)", text_color=color.white)
+    table.cell(tbl, 1, 12, str.tostring(netAll, "#.00"), text_color=color.white, bgcolor=netAll >= 0 ? color.green : color.red)
+    table.cell(tbl, 0, 13, "Najgorszy dzień ($)", text_color=color.white)
+    table.cell(tbl, 1, 13, str.tostring(worstDay, "#.00"), text_color=color.white, bgcolor=maxDayLoss > 0 and worstDay <= -maxDayLoss ? color.red : color.gray)
+    table.cell(tbl, 0, 14, "Dni z blokadą FTMO", text_color=color.white)
+    table.cell(tbl, 1, 14, str.tostring(nBlockedDays), text_color=color.white)
+
+// ───────────────────────── Alerty ─────────────────────────
+alertcondition(evXL or evTL, "HTS LONG", "HTS: LONG {{ticker}} @ {{close}}")
+alertcondition(evXS or evTS, "HTS SHORT", "HTS: SHORT {{ticker}} @ {{close}}")
+alertcondition(not na(pxTp1), "HTS TP1", "HTS: TP1 {{ticker}} @ {{close}}")
+alertcondition(not na(pxSl) or not na(pxWin) or not na(pxEod), "HTS wyjście", "HTS: pozycja zamknięta {{ticker}} @ {{close}}")
+alertcondition(evPb, "HTS pullback H1", "HTS: pullback na Trend TF {{ticker}}")
+
+if evXL or evXS or evTL or evTS
+    alert("HTS " + (evXL or evTL ? "LONG " : "SHORT ") + syminfo.ticker + " @ " + str.tostring(lvEntry, format.mintick) + " | SL " + str.tostring(lvSl, format.mintick) + " | TP1 " + str.tostring(lvTp1, format.mintick), alert.freq_once_per_bar_close)
