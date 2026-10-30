@@ -93,7 +93,7 @@ namespace cAlgo.Robots
         public double MaxSLPips { get; set; }
 
         // ───────── UŚREDNIANIE ─────────
-        [Parameter("Campaign Risk ($, all entries filled)", DefaultValue = 500.0, MinValue = 1.0, Group = "=== SCALE-IN ===")]
+        [Parameter("Campaign Risk ($, all entries filled)", DefaultValue = 300.0, MinValue = 1.0, Group = "=== SCALE-IN ===")]
         public double CampaignRiskCash { get; set; }
 
         [Parameter("Number of Entries", DefaultValue = 3, MinValue = 1, MaxValue = 5, Group = "=== SCALE-IN ===")]
