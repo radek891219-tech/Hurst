@@ -1,0 +1,201 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// HTS + Hurst – sygnały tylko w rozchodzącym się trendzie
+//  • wstęgi HTS: szybka (33) i wolna (144) z High i Low (Wilder, jak w cBocie HTS)
+//  • trend spadkowy: szybka wstęga cała pod wolną; wzrostowy: cała nad wolną
+//  • warunek 1: wstęgi są od siebie oddalone (min. odstęp w ATR) i się ROZCHODZĄ (odstęp rośnie)
+//  • warunek 2: cena dotyka pasma Hursta (LazyBear) po przeciwnej stronie – górnego dla shorta, dolnego dla longa
+//  • gdy wstęgi się schodzą (odstęp maleje) – brak sygnałów
+//  • poziomy SL / TP przy sygnale + prosta statystyka sygnałów z historii
+//@version=5
+indicator("HTS + Hurst – rozchodzące się wstęgi", shorttitle="HTS+Hurst", overlay=true, max_labels_count=500, max_lines_count=500)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpH = "=== Wstęgi HTS ==="
+fastLen = input.int(33, "Szybka wstęga", minval=2, group=grpH)
+slowLen = input.int(144, "Wolna wstęga", minval=2, group=grpH)
+maType  = input.string("Wilder", "Typ średniej", options=["Wilder", "EMA", "SMA"], group=grpH)
+
+grpD = "=== Rozchodzenie się wstęg ==="
+minGap  = input.float(0.3, "Min. odstęp wstęg (x ATR)", minval=0, step=0.05, group=grpD, tooltip="Odstęp między krawędziami wstęg: dla spadków dół wolnej minus góra szybkiej.")
+needExp = input.bool(true, "Wymagaj rozchodzenia się (odstęp rośnie)", group=grpD)
+expLen  = input.int(10, "Porównaj odstęp z sytuacją sprzed (świece)", minval=1, group=grpD)
+expMin  = input.float(0.0, "Min. przyrost odstępu (x ATR)", minval=0, step=0.05, group=grpD)
+
+grpU = "=== Pasma Hursta (LazyBear) ==="
+hSrc     = input.source(hl2, "Źródło", group=grpU)
+hLen     = input.int(10, "Długość CMA", minval=2, group=grpU)
+atrLen   = input.int(100, "ATR", minval=1, group=grpU)
+innerK   = input.float(1.6, "Pasmo wewnętrzne (x ATR)", step=0.1, group=grpU)
+outerK   = input.float(2.6, "Pasmo zewnętrzne (x ATR)", step=0.1, group=grpU)
+extK     = input.float(4.2, "Pasmo ekstremalne (x ATR)", step=0.1, group=grpU)
+touchSel = input.string("Zewnętrzne", "Pasmo, którego dotknięcie daje sygnał", options=["Wewnętrzne", "Zewnętrzne", "Ekstremalne"], group=grpU)
+
+grpS = "=== Sygnały ==="
+needSide  = input.bool(true, "Short tylko pod wolną wstęgą HTS, long tylko nad", group=grpS)
+confClose = input.bool(false, "Wymagaj zamknięcia z powrotem wewnątrz pasma Hursta", group=grpS)
+cooldown  = input.int(10, "Min. odstęp między sygnałami (świece)", minval=0, group=grpS)
+useSess   = input.bool(false, "Sygnały tylko w sesji", group=grpS)
+sessStr   = input.session("0800-2000", "Sesja", group=grpS)
+sessTz    = input.string("Europe/Warsaw", "Strefa czasowa sesji", group=grpS)
+
+grpL = "=== SL / TP ==="
+showLvl = input.bool(true, "Rysuj SL i TP przy sygnale", group=grpL)
+slBuf   = input.float(0.3, "SL: zapas za pasmem ekstremalnym (x ATR)", minval=0, step=0.05, group=grpL)
+tpMode  = input.string("R-krotność", "TP", options=["R-krotność", "Środek Hursta (CMA)", "Przeciwne pasmo zewnętrzne"], group=grpL)
+tpR     = input.float(2.0, "TP: R-krotność ryzyka", minval=0.1, step=0.1, group=grpL)
+
+grpV = "=== Wygląd ==="
+showHts  = input.bool(true, "Wstęgi HTS", group=grpV)
+showHur  = input.bool(true, "Pasma Hursta", group=grpV)
+showBg   = input.bool(true, "Tło: kiedy wskaźnik szuka sygnału", group=grpV)
+showTbl  = input.bool(true, "Tabela", group=grpV)
+
+// ───────────────────────── Wstęgi HTS ─────────────────────────
+f_ma(float src, simple int n) =>
+    float r = ta.rma(src, n)
+    float e = ta.ema(src, n)
+    float s = ta.sma(src, n)
+    maType == "Wilder" ? r : maType == "EMA" ? e : s
+
+fH  = f_ma(high, fastLen)
+fL  = f_ma(low,  fastLen)
+sH  = f_ma(high, slowLen)
+sL  = f_ma(low,  slowLen)
+atr = ta.atr(atrLen)
+
+upTrend = fL > sH
+dnTrend = fH < sL
+gap     = upTrend ? fL - sH : dnTrend ? sL - fH : 0.0
+gapAtr  = gap / atr
+growing = gap - nz(gap[expLen]) >= expMin * atr and gap > nz(gap[expLen])
+
+activeUp = upTrend and gapAtr >= minGap and (not needExp or growing)
+activeDn = dnTrend and gapAtr >= minGap and (not needExp or growing)
+
+// ───────────────────────── Pasma Hursta ─────────────────────────
+disp = math.floor(hLen / 2) + 1
+cma  = ta.sma(hSrc[disp], hLen)
+upIn  = cma + innerK * atr
+loIn  = cma - innerK * atr
+upOut = cma + outerK * atr
+loOut = cma - outerK * atr
+upExt = cma + extK * atr
+loExt = cma - extK * atr
+kSel  = touchSel == "Wewnętrzne" ? innerK : touchSel == "Zewnętrzne" ? outerK : extK
+upB   = cma + kSel * atr
+loB   = cma - kSel * atr
+
+// ───────────────────────── Sygnały ─────────────────────────
+inSess = not useSess or not na(time(timeframe.period, sessStr, sessTz))
+touchS = high >= upB and (not confClose or close < upB)
+touchL = low <= loB and (not confClose or close > loB)
+sideS  = not needSide or close < sL
+sideL  = not needSide or close > sH
+rawS   = activeDn and touchS and sideS and inSess
+rawL   = activeUp and touchL and sideL and inSess
+
+var int lastSig = -100000
+okCd   = bar_index - lastSig > cooldown
+sigS   = barstate.isconfirmed and rawS and not rawS[1] and okCd
+sigL   = barstate.isconfirmed and rawL and not rawL[1] and okCd and not sigS
+if sigS or sigL
+    lastSig := bar_index
+
+// Poziomy SL / TP
+f_levels(int dir) =>
+    float sl   = dir == -1 ? math.max(high, upExt) + slBuf * atr : math.min(low, loExt) - slBuf * atr
+    float risk = math.abs(sl - close)
+    float tp   = close + dir * tpR * risk
+    if tpMode == "Środek Hursta (CMA)"
+        tp := cma
+    else if tpMode == "Przeciwne pasmo zewnętrzne"
+        tp := dir == -1 ? loOut : upOut
+    // cel po złej stronie ceny (np. CMA nad ceną przy shorcie) → R-krotność
+    if (dir == -1 and tp >= close) or (dir == 1 and tp <= close)
+        tp := close + dir * tpR * risk
+    [sl, tp, risk]
+
+// ───────────────────────── Statystyka sygnałów (jedna pozycja naraz) ─────────────────────────
+var int   simDir = 0
+var float simSL  = na
+var float simTP  = na
+var float simEnt = na
+var int   nWin   = 0
+var int   nLoss  = 0
+var float sumR   = 0.0
+
+if barstate.isconfirmed and simDir != 0
+    hitSl = simDir == 1 ? low <= simSL : high >= simSL
+    hitTp = simDir == 1 ? high >= simTP : low <= simTP
+    if hitSl
+        nLoss += 1
+        sumR  -= 1
+        simDir := 0
+    else if hitTp
+        nWin += 1
+        sumR += math.abs(simTP - simEnt) / math.abs(simEnt - simSL)
+        simDir := 0
+
+if sigS or sigL
+    d = sigS ? -1 : 1
+    [sl, tp, risk] = f_levels(d)
+    if simDir == 0
+        simDir := d
+        simSL  := sl
+        simTP  := tp
+        simEnt := close
+    if showLvl
+        line.new(bar_index, sl, bar_index + 30, sl, color=color.new(color.red, 0), width=2, style=line.style_dashed)
+        line.new(bar_index, tp, bar_index + 30, tp, color=color.new(color.green, 0), width=2, style=line.style_dashed)
+        label.new(bar_index, d == -1 ? high : low, (d == -1 ? "SHORT" : "LONG") + "\nSL " + str.tostring(sl, format.mintick) + "\nTP " + str.tostring(tp, format.mintick),
+             style=d == -1 ? label.style_label_down : label.style_label_up, color=d == -1 ? color.new(color.red, 10) : color.new(color.green, 10), textcolor=color.white, size=size.small)
+
+// ───────────────────────── Wykres ─────────────────────────
+pFH = plot(showHts ? fH : na, "HTS szybka – góra", color=color.new(color.blue, 0))
+pFL = plot(showHts ? fL : na, "HTS szybka – dół",  color=color.new(color.blue, 0))
+pSH = plot(showHts ? sH : na, "HTS wolna – góra",  color=color.new(color.red, 0))
+pSL = plot(showHts ? sL : na, "HTS wolna – dół",   color=color.new(color.red, 0))
+fill(pFH, pFL, color=color.new(color.blue, 75), title="Wstęga szybka")
+fill(pSH, pSL, color=color.new(color.orange, 70), title="Wstęga wolna")
+
+plot(showHur ? cma : na,   "Hurst CMA", color=color.new(color.gray, 0))
+plot(showHur ? upIn : na,  "Hurst górne wewnętrzne",  color=color.new(color.gray, 40))
+plot(showHur ? loIn : na,  "Hurst dolne wewnętrzne",  color=color.new(color.gray, 40))
+plot(showHur ? upOut : na, "Hurst górne zewnętrzne",  color=color.new(color.red, 20), linewidth=2)
+plot(showHur ? loOut : na, "Hurst dolne zewnętrzne",  color=color.new(color.green, 20), linewidth=2)
+plot(showHur ? upExt : na, "Hurst górne ekstremalne", color=color.new(color.red, 40), style=plot.style_circles)
+plot(showHur ? loExt : na, "Hurst dolne ekstremalne", color=color.new(color.green, 40), style=plot.style_circles)
+
+bgcolor(showBg and activeDn ? color.new(color.red, 92) : showBg and activeUp ? color.new(color.green, 92) : na, title="Szukam sygnału")
+
+plotshape(sigS, "SHORT", shape.triangledown, location.abovebar, color.new(color.red, 0),   size=size.small)
+plotshape(sigL, "LONG",  shape.triangleup,   location.belowbar, color.new(color.green, 0), size=size.small)
+
+// ───────────────────────── Tabela ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 20), border_width=1)
+if showTbl and barstate.islast
+    trTxt  = upTrend ? "W GÓRĘ" : dnTrend ? "W DÓŁ" : "BRAK"
+    trCol  = upTrend ? color.green : dnTrend ? color.red : color.gray
+    expTxt = gap <= 0 ? "–" : growing ? "ROZCHODZĄ SIĘ" : "SCHODZĄ SIĘ"
+    modTxt = activeDn ? "SZUKAM SHORT" : activeUp ? "SZUKAM LONG" : "BEZ SYGNAŁÓW"
+    modCol = activeDn ? color.red : activeUp ? color.green : color.gray
+    nAll   = nWin + nLoss
+    table.cell(tbl, 0, 0, "Trend HTS", text_color=color.white)
+    table.cell(tbl, 1, 0, trTxt, text_color=color.white, bgcolor=trCol)
+    table.cell(tbl, 0, 1, "Odstęp wstęg", text_color=color.white)
+    table.cell(tbl, 1, 1, str.tostring(gapAtr, "#.00") + " ATR", text_color=color.white)
+    table.cell(tbl, 0, 2, "Wstęgi", text_color=color.white)
+    table.cell(tbl, 1, 2, expTxt, text_color=color.white, bgcolor=growing and gap > 0 ? color.new(color.blue, 30) : color.new(color.gray, 30))
+    table.cell(tbl, 0, 3, "Tryb", text_color=color.white)
+    table.cell(tbl, 1, 3, modTxt, text_color=color.white, bgcolor=modCol)
+    table.cell(tbl, 0, 4, "Sygnały (TP / SL)", text_color=color.white)
+    table.cell(tbl, 1, 4, str.tostring(nAll) + "  (" + str.tostring(nWin) + " / " + str.tostring(nLoss) + ")", text_color=color.white)
+    table.cell(tbl, 0, 5, "Skuteczność", text_color=color.white)
+    table.cell(tbl, 1, 5, nAll > 0 ? str.tostring(100.0 * nWin / nAll, "#.0") + " %" : "–", text_color=color.white)
+    table.cell(tbl, 0, 6, "Suma / średnio R", text_color=color.white)
+    table.cell(tbl, 1, 6, str.tostring(sumR, "#.0") + " R / " + (nAll > 0 ? str.tostring(sumR / nAll, "#.00") : "–") + " R", text_color=color.white, bgcolor=sumR >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+
+// ───────────────────────── Alerty ─────────────────────────
+alertcondition(sigS, "HTS+Hurst SHORT", "HTS+Hurst: SHORT {{ticker}} @ {{close}}")
+alertcondition(sigL, "HTS+Hurst LONG",  "HTS+Hurst: LONG {{ticker}} @ {{close}}")
+alertcondition(sigS or sigL, "HTS+Hurst dowolny sygnał", "HTS+Hurst: sygnał {{ticker}} @ {{close}}")
