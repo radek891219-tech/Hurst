@@ -7,12 +7,16 @@
 //   3. szybka wstęga mocno opada / rośnie,
 //   4. zamknięcie za szybką wstęgą,
 //   5. wcześniej cena odbiła się od wolnej wstęgi (niższy szczyt / wyższy dołek),
-//   6. odstęp między wstęgami rośnie.
+//   6. odstęp między wstęgami rośnie,
+//   7. (opcja) trend HTS na wyższym interwale w tę samą stronę.
 //  • PRZYGOTOWANIE – brakuje 1 warunku (tło + alert): setup się buduje,
 //  • START – wszystkie warunki spełnione na zamkniętej świecy (bez repaintu),
 //  • ramka rysuje się na bieżąco, dopóki trwa wzorzec; koniec = N zamknięć po drugiej stronie szybkiej wstęgi,
-//  • dokładki: cofnięcie do szybkiej wstęgi i odrzucenie w trakcie wzorca,
-//  • statystyka: ile startów dało duży trend, średni zasięg w ATR, wynik w R (wyjście na końcu wzorca).
+//  • dokładki: cofnięcie do szybkiej wstęgi i odrzucenie – domyślnie tylko gdy START jest już na plusie,
+//  • porównanie 6 sposobów zarządzania pozycją na tych samych sygnałach (R, skuteczność, obsunięcie, serie strat),
+//  • krzywa kapitału przy stałym % ryzyka dla wybranego wariantu.
+//  Zarządzanie kapitałem (wielkość pozycji) nie zmienia znaku wyniku – zmienia go tylko wejście i wyjście.
+//  Dlatego porównywane są wyjścia, a wielkość pozycji służy do kontroli obsunięcia.
 //@version=5
 indicator("HTS – wczesne wykrywanie trendu", shorttitle="HTS Start", overlay=true, max_labels_count=500, max_boxes_count=500)
 
@@ -38,6 +42,8 @@ s5Len  = input.int(60, "    dotknięcie wolnej w ostatnich (świece)", minval=1,
 s5Stay = input.int(20, "    bez zamknięcia za wolną przez (świece)", minval=1, group=grpC)
 use6   = input.bool(true, "6. Odstęp między wstęgami rośnie", group=grpC)
 s6Len  = input.int(5, "    porównaj z odstępem sprzed (świece)", minval=1, group=grpC)
+use7   = input.bool(false, "7. Trend HTS na wyższym interwale zgodny", group=grpC, tooltip="Szybka wstęga cała pod wolną (short) / nad wolną (long) na zamkniętej świecy wyższego interwału – jak trend H1 w cBocie HTS.")
+s7Tf   = input.timeframe("60", "    wyższy interwał", group=grpC)
 preMis = input.int(1, "PRZYGOTOWANIE, gdy brakuje najwyżej (warunków)", minval=1, group=grpC)
 dirSel = input.string("Oba", "Kierunek", options=["Oba", "Tylko short", "Tylko long"], group=grpC)
 useSess = input.bool(false, "Starty tylko w sesji", group=grpC)
@@ -45,17 +51,31 @@ sessStr = input.session("0800-2000", "Sesja", group=grpC)
 sessTz  = input.string("Europe/Warsaw", "Strefa czasowa sesji", group=grpC)
 
 grpP = "=== Trwanie wzorca i dokładki ==="
-endBars = input.int(3, "Koniec: zamknięcia za szybką wstęgą (świece z rzędu)", minval=1, group=grpP, tooltip="Short kończy się po N zamknięciach nad szybką wstęgą z rzędu albo od razu po zamknięciu nad wolną. Long odwrotnie.")
+endBars = input.int(3, "Koniec: zamknięcia za szybką wstęgą (świece z rzędu)", minval=1, group=grpP, tooltip="Short kończy się po N zamknięciach nad szybką wstęgą z rzędu albo od razu po zamknięciu nad wolną. Long odwrotnie. Na końcu wzorca zamykane są wszystkie otwarte wejścia.")
 showPB  = input.bool(true, "Dokładki: cofnięcie do szybkiej wstęgi", group=grpP)
 pbCd    = input.int(10, "    min. odstęp od poprzedniego wejścia (świece)", minval=1, group=grpP)
 pbMax   = input.int(4, "    max dokładek w jednym wzorcu", minval=0, group=grpP)
+pbNeedR = input.float(1.0, "    dokładka tylko gdy START ma już zysk ≥ (R, 0 = zawsze)", minval=0, step=0.5, group=grpP, tooltip="Dokładaj tylko do wygrywającej pozycji (piramidowanie). Przy 0 dokładka może przyjść, gdy START jest na minusie – wtedy ryzyko wzorca rośnie.")
 
-grpR = "=== Test na historii ==="
+grpR = "=== SL i koszty ==="
 slLen   = input.int(20, "SL startu: za ekstremum z ostatnich (świece)", minval=1, group=grpR)
 pbSlLen = input.int(5, "SL dokładki: za ekstremum z ostatnich (świece)", minval=1, group=grpR)
 slBuf   = input.float(0.2, "Zapas SL (x ATR)", minval=0, step=0.05, group=grpR)
 minRisk = input.float(0.5, "Min. ryzyko (x ATR)", minval=0.05, step=0.05, group=grpR)
+costPts = input.float(0.0, "Koszt na wejście (w punktach ceny: spread + prowizja)", minval=0, step=0.1, group=grpR, tooltip="TradingView nie zna spreadu. Wpisz średni koszt jednej transakcji w punktach ceny (np. GER40 ok. 1–2), inaczej wynik jest zawyżony.")
 bigK    = input.float(6.0, "Duży trend = zasięg co najmniej (x ATR)", minval=0.5, step=0.5, group=grpR)
+
+grpM = "=== Zarządzanie pozycją (porównanie wariantów) ==="
+beR      = input.float(1.0, "BE: SL na wejście po zysku (R)", minval=0.1, step=0.1, group=grpM)
+tpR      = input.float(2.0, "Częściowe TP przy (R)", minval=0.1, step=0.1, group=grpM)
+tpPct    = input.float(50, "Częściowe TP: zamknij (% pozycji)", minval=1, maxval=99, group=grpM)
+trStartR = input.float(1.0, "Trailing po szybkiej wstędze: start po zysku (R)", minval=0, step=0.1, group=grpM)
+trBuf    = input.float(0.3, "Trailing: zapas za szybką wstęgą (x ATR)", minval=0, step=0.05, group=grpM)
+tsBars   = input.int(15, "Stop czasowy: sprawdź po (świece)", minval=1, group=grpM)
+tsR      = input.float(0.5, "Stop czasowy: wyjdź, jeśli zysk max < (R)", minval=0, step=0.1, group=grpM, tooltip="Nieudane starty (szybkie V) rzadko dają zysk później. Jeśli po N świecach pozycja nie zarobiła nawet tyle, wyjście po rynku zamiast czekać na pełny SL.")
+selVar   = input.string("6. Wszystko razem", "Wariant w tabeli głównej i krzywej kapitału",
+     options=["1. Bazowy", "2. BE", "3. Częściowe TP + BE", "4. Trailing po szybkiej", "5. Stop czasowy + BE", "6. Wszystko razem"], group=grpM)
+riskPct  = input.float(0.5, "Ryzyko na wejście (% kapitału)", minval=0.01, step=0.05, group=grpM)
 
 grpV = "=== Wygląd ==="
 showBands = input.bool(true, "Wstęgi HTS", group=grpV)
@@ -63,6 +83,7 @@ showBox   = input.bool(true, "Ramka wzorca (rysowana na bieżąco)", group=grpV)
 showBg    = input.bool(true, "Tło: PRZYGOTOWANIE", group=grpV)
 showEnd   = input.bool(true, "Etykieta na końcu wzorca (zasięg)", group=grpV)
 showTbl   = input.bool(true, "Tabela", group=grpV)
+showCmp   = input.bool(true, "Tabela porównania wariantów", group=grpV)
 
 // ───────────────────────── Wstęgi HTS ─────────────────────────
 f_ma(float src, simple int n) =>
@@ -90,6 +111,11 @@ bsBelow  = nz(ta.barssince(close < sL), 100000)
 gapDn = sL - fH
 gapUp = fL - sH
 
+// Trend HTS z wyższego interwału – zamknięta świeca, bez repaintu
+[hDn, hUp] = request.security(syminfo.tickerid, s7Tf, [dnTr[1], upTr[1]], lookahead=barmerge.lookahead_on)
+if use7 and timeframe.in_seconds(s7Tf) <= timeframe.in_seconds()
+    runtime.error("Warunek 7: wyższy interwał musi być większy niż interwał wykresu.")
+
 // ───────────────────────── Warunki ─────────────────────────
 c1S = sM - sM[s1Len] <= -s1Min * atr
 c1L = sM - sM[s1Len] >=  s1Min * atr
@@ -103,13 +129,15 @@ c5S = bsTouchS <= s5Len and bsAbove >= s5Stay
 c5L = bsTouchL <= s5Len and bsBelow >= s5Stay
 c6S = gapDn > gapDn[s6Len]
 c6L = gapUp > gapUp[s6Len]
+c7S = hDn == true
+c7L = hUp == true
 
 f_pt(bool u, bool c) =>
     u and c ? 1 : 0
 
-total = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0) + (use6 ? 1 : 0)
-scS = f_pt(use1, c1S) + f_pt(use2, c2S) + f_pt(use3, c3S) + f_pt(use4, c4S) + f_pt(use5, c5S) + f_pt(use6, c6S)
-scL = f_pt(use1, c1L) + f_pt(use2, c2L) + f_pt(use3, c3L) + f_pt(use4, c4L) + f_pt(use5, c5L) + f_pt(use6, c6L)
+total = (use1 ? 1 : 0) + (use2 ? 1 : 0) + (use3 ? 1 : 0) + (use4 ? 1 : 0) + (use5 ? 1 : 0) + (use6 ? 1 : 0) + (use7 ? 1 : 0)
+scS = f_pt(use1, c1S) + f_pt(use2, c2S) + f_pt(use3, c3S) + f_pt(use4, c4S) + f_pt(use5, c5S) + f_pt(use6, c6S) + f_pt(use7, c7S)
+scL = f_pt(use1, c1L) + f_pt(use2, c2L) + f_pt(use3, c3L) + f_pt(use4, c4L) + f_pt(use5, c5L) + f_pt(use6, c6L) + f_pt(use7, c7L)
 
 inSess = not useSess or not na(time(timeframe.period, sessStr, sessTz))
 okS    = dirSel != "Tylko long"
@@ -117,10 +145,67 @@ okL    = dirSel != "Tylko short"
 allS   = total > 0 and scS == total and okS and inSess and not na(atr)
 allL   = total > 0 and scL == total and okL and inSess and not na(atr)
 
+// ───────────────────────── Warianty zarządzania ─────────────────────────
+// 0 Bazowy: stały SL, wyjście na końcu wzorca
+// 1 BE: SL na wejście po beR
+// 2 Częściowe TP: tpPct % przy tpR, potem SL na BE, reszta do końca wzorca
+// 3 Trailing: po trStartR SL idzie za szybką wstęgą
+// 4 Stop czasowy + BE
+// 5 Wszystko razem: stop czasowy + częściowe TP + BE + trailing
+NV = 6
+selIdx = str.tonumber(str.substring(selVar, 0, 1)) - 1
+var varNames = array.from("1. Bazowy", "2. BE", "3. Częściowe TP + BE", "4. Trailing po szybkiej", "5. Stop czasowy + BE", "6. Wszystko razem")
+
+f_be(int v) =>
+    v == 1 or v == 4 or v == 5
+f_tp(int v) =>
+    v == 2 or v == 5
+f_tr(int v) =>
+    v == 3 or v == 5
+f_ts(int v) =>
+    v == 4 or v == 5
+
+// Statystyka wariantów (zamknięte transakcje)
+var array<float> vsN    = array.new<float>(NV, 0.0)
+var array<float> vsW    = array.new<float>(NV, 0.0)
+var array<float> vsSum  = array.new<float>(NV, 0.0)
+var array<float> vsPeak = array.new<float>(NV, 0.0)
+var array<float> vsDD   = array.new<float>(NV, 0.0)
+var array<float> vsStr  = array.new<float>(NV, 0.0)
+var array<float> vsMStr = array.new<float>(NV, 0.0)
+// Wybrany wariant: START (0) i dokładki (1) osobno, kapitał [kapitał, szczyt, max obsunięcie %]
+var array<float> ksN   = array.new<float>(2, 0.0)
+var array<float> ksW   = array.new<float>(2, 0.0)
+var array<float> ksSum = array.new<float>(2, 0.0)
+var array<float> eqA   = array.from(100.0, 100.0, 0.0)
+
+f_rec(int v, int k, float r) =>
+    array.set(vsN, v, array.get(vsN, v) + 1)
+    array.set(vsW, v, array.get(vsW, v) + (r > 0 ? 1 : 0))
+    float cum = array.get(vsSum, v) + r
+    array.set(vsSum, v, cum)
+    float pk = math.max(array.get(vsPeak, v), cum)
+    array.set(vsPeak, v, pk)
+    array.set(vsDD, v, math.max(array.get(vsDD, v), pk - cum))
+    float st = r < 0 ? array.get(vsStr, v) + 1 : 0.0
+    array.set(vsStr, v, st)
+    array.set(vsMStr, v, math.max(array.get(vsMStr, v), st))
+    if v == selIdx
+        array.set(ksN, k, array.get(ksN, k) + 1)
+        array.set(ksW, k, array.get(ksW, k) + (r > 0 ? 1 : 0))
+        array.set(ksSum, k, array.get(ksSum, k) + r)
+        float eq  = array.get(eqA, 0) * (1 + riskPct / 100 * r)
+        float ePk = math.max(array.get(eqA, 1), eq)
+        array.set(eqA, 0, eq)
+        array.set(eqA, 1, ePk)
+        array.set(eqA, 2, math.max(array.get(eqA, 2), 100 * (ePk - eq) / ePk))
+    true
+
 // ───────────────────────── Wzorzec + test ─────────────────────────
 var int   pDir    = 0
 var int   pStart  = 0
 var float pEntry  = na
+var float pRisk   = na
 var float pAtr    = na
 var float pExt    = na
 var int   pEndCnt = 0
@@ -128,19 +213,20 @@ var int   pPbCnt  = 0
 var int   lastEnt = 0
 var box   pBox    = na
 
+// Otwarte wejścia: dane wejścia + stan każdego wariantu (indeks = wejście * NV + wariant)
 var array<float> tEnt  = array.new<float>()
-var array<float> tSl   = array.new<float>()
+var array<float> tRisk = array.new<float>()
 var array<int>   tKind = array.new<int>()
+var array<int>   tBar  = array.new<int>()
+var array<float> tMfe  = array.new<float>()
+var array<float> vSl   = array.new<float>()
+var array<float> vRem  = array.new<float>()
+var array<float> vReal = array.new<float>()
+var array<int>   vOpen = array.new<int>()
 
 var int   nPat  = 0
 var int   nBig  = 0
 var float sumMf = 0.0
-var int   nS    = 0
-var int   nWS   = 0
-var float sumRS = 0.0
-var int   nP    = 0
-var int   nWP   = 0
-var float sumRP = 0.0
 
 hiSl = ta.highest(high, slLen)
 loSl = ta.lowest(low, slLen)
@@ -152,6 +238,23 @@ f_sl(int d, float hi, float lo) =>
     float r   = math.max(math.abs(raw - close), minRisk * atr)
     close - d * r
 
+f_open(int k, float s) =>
+    array.push(tEnt, close)
+    array.push(tRisk, math.abs(close - s))
+    array.push(tKind, k)
+    array.push(tBar, bar_index)
+    array.push(tMfe, 0.0)
+    for v = 0 to NV - 1
+        array.push(vSl, s)
+        array.push(vRem, 1.0)
+        array.push(vReal, 0.0)
+        array.push(vOpen, 1)
+    true
+
+// lepszy (bliższy zysku) z dwóch poziomów SL
+f_tight(int d, float a, float b) =>
+    d == -1 ? math.min(a, b) : math.max(a, b)
+
 bool stS  = false
 bool stL  = false
 bool pbS  = false
@@ -160,22 +263,7 @@ bool endE = false
 
 if barstate.isconfirmed
     if pDir != 0
-        // 1) SL otwartych wejść
-        if array.size(tEnt) > 0
-            for i = array.size(tEnt) - 1 to 0
-                float sl  = array.get(tSl, i)
-                bool  hit = pDir == -1 ? high >= sl : low <= sl
-                if hit
-                    if array.get(tKind, i) == 0
-                        nS    += 1
-                        sumRS -= 1
-                    else
-                        nP    += 1
-                        sumRP -= 1
-                    array.remove(tEnt, i)
-                    array.remove(tSl, i)
-                    array.remove(tKind, i)
-        // 2) ekstremum i ramka
+        // 1) ekstremum, ramka, czy wzorzec się kończy
         pExt := pDir == -1 ? math.min(pExt, low) : math.max(pExt, high)
         if not na(pBox)
             box.set_right(pBox, bar_index)
@@ -183,43 +271,90 @@ if barstate.isconfirmed
                 box.set_bottom(pBox, pExt)
             else
                 box.set_top(pBox, pExt)
-        // 3) koniec wzorca
         bool against = pDir == -1 ? close > fH : close < fL
         bool hard    = pDir == -1 ? close > sH : close < sL
         pEndCnt := against ? pEndCnt + 1 : 0
-        if pEndCnt >= endBars or hard
-            if array.size(tEnt) > 0
-                for i = array.size(tEnt) - 1 to 0
-                    float e = array.get(tEnt, i)
-                    float r = pDir * (close - e) / math.abs(e - array.get(tSl, i))
-                    if array.get(tKind, i) == 0
-                        nS    += 1
-                        nWS   += r > 0 ? 1 : 0
-                        sumRS += r
-                    else
-                        nP    += 1
-                        nWP   += r > 0 ? 1 : 0
-                        sumRP += r
-            array.clear(tEnt)
-            array.clear(tSl)
-            array.clear(tKind)
-            float mfe = pDir * (pExt - pEntry) / pAtr
+        bool patEnd = pEndCnt >= endBars or hard
+
+        // 2) prowadzenie otwartych wejść – każdy wariant osobno
+        int nT = array.size(tEnt)
+        if nT > 0
+            for i = nT - 1 to 0
+                float e   = array.get(tEnt, i)
+                float rk  = array.get(tRisk, i)
+                int   k   = array.get(tKind, i)
+                float mfe = math.max(array.get(tMfe, i), pDir * ((pDir == -1 ? low : high) - e) / rk)
+                int   age = bar_index - array.get(tBar, i)
+                int   still = 0
+                for v = 0 to NV - 1
+                    int j = i * NV + v
+                    if array.get(vOpen, j) == 1
+                        float sl  = array.get(vSl, j)
+                        float rem = array.get(vRem, j)
+                        float rl  = array.get(vReal, j)
+                        bool  cl  = false
+                        // a) SL (z poprzedniej świecy) – przed TP, ostrożnie
+                        if pDir == -1 ? high >= sl : low <= sl
+                            rl += rem * pDir * (sl - e) / rk
+                            cl := true
+                        else
+                            // b) częściowe TP
+                            if f_tp(v) and rem > 0.999 and mfe >= tpR
+                                rl  += tpPct / 100 * tpR
+                                rem -= tpPct / 100
+                                sl  := f_tight(pDir, sl, e)
+                            // c) BE
+                            if f_be(v) and mfe >= beR
+                                sl := f_tight(pDir, sl, e)
+                            // d) trailing za szybką wstęgą
+                            if f_tr(v) and mfe >= trStartR
+                                sl := f_tight(pDir, sl, pDir == -1 ? fH + trBuf * atr : fL - trBuf * atr)
+                            // e) stop czasowy
+                            if f_ts(v) and age >= tsBars and mfe < tsR
+                                cl := true
+                            // f) koniec wzorca albo nowy SL już za ceną zamknięcia → wyjście po rynku
+                            if patEnd or (pDir == -1 ? close >= sl : close <= sl)
+                                cl := true
+                            if cl
+                                rl += rem * pDir * (close - e) / rk
+                        if cl
+                            array.set(vOpen, j, 0)
+                            f_rec(v, k, rl - costPts / rk)
+                        else
+                            array.set(vSl, j, sl)
+                            array.set(vRem, j, rem)
+                            array.set(vReal, j, rl)
+                            still += 1
+                array.set(tMfe, i, mfe)
+                if still == 0
+                    for j = i * NV + NV - 1 to i * NV
+                        array.remove(vSl, j)
+                        array.remove(vRem, j)
+                        array.remove(vReal, j)
+                        array.remove(vOpen, j)
+                    array.remove(tEnt, i)
+                    array.remove(tRisk, i)
+                    array.remove(tKind, i)
+                    array.remove(tBar, i)
+                    array.remove(tMfe, i)
+
+        // 3) koniec wzorca
+        if patEnd
+            float mfeA = pDir * (pExt - pEntry) / pAtr
             nPat  += 1
-            nBig  += mfe >= bigK ? 1 : 0
-            sumMf += mfe
+            nBig  += mfeA >= bigK ? 1 : 0
+            sumMf += mfeA
             if showEnd
-                label.new(bar_index, pDir == -1 ? low : high, "koniec\n" + str.tostring(mfe, "#.0") + " ATR · " + str.tostring(bar_index - pStart) + " św.",
+                label.new(bar_index, pDir == -1 ? low : high, "koniec\n" + str.tostring(mfeA, "#.0") + " ATR · " + str.tostring(bar_index - pStart) + " św.",
                      style=pDir == -1 ? label.style_label_up : label.style_label_down, color=color.new(color.gray, 20), textcolor=color.white, size=size.tiny)
             endE := true
             pDir := 0
             pBox := na
-        // 4) dokładka: cofnięcie do szybkiej wstęgi i odrzucenie
-        else if showPB and pPbCnt < pbMax and bar_index - lastEnt >= pbCd
+        // 4) dokładka: cofnięcie do szybkiej wstęgi i odrzucenie, tylko do wygrywającej pozycji
+        else if showPB and pPbCnt < pbMax and bar_index - lastEnt >= pbCd and (pbNeedR == 0 or pDir * (pExt - pEntry) / pRisk >= pbNeedR)
             bool pb = pDir == -1 ? high >= fL and close < fM and close < open and fM < fM[s3Len] : low <= fH and close > fM and close > open and fM > fM[s3Len]
             if pb
-                array.push(tEnt, close)
-                array.push(tSl, f_sl(pDir, hiPb, loPb))
-                array.push(tKind, 1)
+                f_open(1, f_sl(pDir, hiPb, loPb))
                 pPbCnt  += 1
                 lastEnt := bar_index
                 pbS := pDir == -1
@@ -230,14 +365,13 @@ if barstate.isconfirmed
         pDir    := d
         pStart  := bar_index
         pEntry  := close
+        pRisk   := math.abs(close - s)
         pAtr    := atr
         pExt    := d == -1 ? low : high
         pEndCnt := 0
         pPbCnt  := 0
         lastEnt := bar_index
-        array.push(tEnt, close)
-        array.push(tSl, s)
-        array.push(tKind, 0)
+        f_open(0, s)
         if showBox
             pBox := box.new(bar_index, d == -1 ? s : pExt, bar_index, d == -1 ? pExt : s, border_color=d == -1 ? color.new(color.red, 30) : color.new(color.green, 30),
                  border_style=line.style_dashed, bgcolor=d == -1 ? color.new(color.red, 88) : color.new(color.green, 88))
@@ -262,12 +396,16 @@ plotshape(stL, "START long",  shape.triangleup,   location.belowbar, color.new(c
 plotshape(pbS, "Dokładka short", shape.triangledown, location.abovebar, color.new(color.orange, 0), size=size.tiny, text="+")
 plotshape(pbL, "Dokładka long",  shape.triangleup,   location.belowbar, color.new(color.aqua, 0),   size=size.tiny, text="+")
 
-// ───────────────────────── Tabela ─────────────────────────
-var table tbl = table.new(position.top_right, 2, 15, bgcolor=color.new(color.black, 20), border_width=1)
+// ───────────────────────── Tabele ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 18, bgcolor=color.new(color.black, 20), border_width=1)
+var table cmp = table.new(position.bottom_right, 7, NV + 1, bgcolor=color.new(color.black, 20), border_width=1)
 
 f_row(int r, string name, bool u, bool ok) =>
     table.cell(tbl, 0, r, name, text_color=color.white, text_halign=text.align_left)
     table.cell(tbl, 1, r, not u ? "wył." : ok ? "✔" : "✘", text_color=color.white, bgcolor=not u ? color.new(color.gray, 50) : ok ? color.new(color.green, 30) : color.new(color.red, 40))
+
+f_cell(int c, int r, string txt, color bg) =>
+    table.cell(cmp, c, r, txt, text_color=color.white, bgcolor=bg, text_size=size.small)
 
 if showTbl and barstate.islast
     int cd = pDir != 0 ? pDir : not okL ? -1 : not okS ? 1 : scS > scL ? -1 : scL > scS ? 1 : fM < sM ? -1 : 1
@@ -281,24 +419,54 @@ if showTbl and barstate.islast
     f_row(4, sh ? "4. Zamknięcie pod szybką" : "4. Zamknięcie nad szybką", use4, sh ? c4S : c4L)
     f_row(5, sh ? "5. Niższy szczyt pod wolną" : "5. Wyższy dołek nad wolną", use5, sh ? c5S : c5L)
     f_row(6, "6. Wstęgi się rozchodzą", use6, sh ? c6S : c6L)
-    table.cell(tbl, 0, 7, "Gotowość", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 7, str.tostring(sc) + " / " + str.tostring(total), text_color=color.white)
+    f_row(7, "7. Trend " + s7Tf + " zgodny", use7, sh ? c7S : c7L)
+    table.cell(tbl, 0, 8, "Gotowość", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 8, str.tostring(sc) + " / " + str.tostring(total), text_color=color.white)
     string stTxt = pDir != 0 ? "WZORZEC TRWA (" + str.tostring(bar_index - pStart) + " św.)" : (sh ? prepS : prepL) ? "PRZYGOTOWANIE" : "CZEKAM"
     color  stCol = pDir != 0 ? (pDir == -1 ? color.red : color.green) : (sh ? prepS : prepL) ? color.new(color.orange, 10) : color.new(color.gray, 40)
-    table.cell(tbl, 0, 8, "Status", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 8, stTxt, text_color=color.white, bgcolor=stCol)
-    table.cell(tbl, 0, 9, "Zasięg teraz", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 9, pDir != 0 ? str.tostring(pDir * (pExt - pEntry) / pAtr, "#.0") + " ATR" : "–", text_color=color.white)
-    table.cell(tbl, 0, 10, "Wzorce (duże ≥ " + str.tostring(bigK, "#.#") + " ATR)", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 10, str.tostring(nPat) + "  (" + str.tostring(nBig) + (nPat > 0 ? " = " + str.tostring(100.0 * nBig / nPat, "#") + " %" : "") + ")", text_color=color.white)
-    table.cell(tbl, 0, 11, "Śr. zasięg wzorca", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 11, nPat > 0 ? str.tostring(sumMf / nPat, "#.0") + " ATR" : "–", text_color=color.white)
-    table.cell(tbl, 0, 12, "START: suma / śr. R", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 12, str.tostring(sumRS, "#.0") + " R / " + (nS > 0 ? str.tostring(sumRS / nS, "#.00") + " R" : "–"), text_color=color.white, bgcolor=sumRS >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
-    table.cell(tbl, 0, 13, "START: wejść / zysk.", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 13, str.tostring(nS) + " / " + (nS > 0 ? str.tostring(100.0 * nWS / nS, "#") + " %" : "–"), text_color=color.white)
-    table.cell(tbl, 0, 14, "Dokładki: wejść / suma R", text_color=color.white, text_halign=text.align_left)
-    table.cell(tbl, 1, 14, str.tostring(nP) + " / " + str.tostring(sumRP, "#.0") + " R" + (nP > 0 ? " (" + str.tostring(100.0 * nWP / nP, "#") + " %)" : ""), text_color=color.white, bgcolor=sumRP >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+    table.cell(tbl, 0, 9, "Status", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 9, stTxt, text_color=color.white, bgcolor=stCol)
+    table.cell(tbl, 0, 10, "Zasięg teraz", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 10, pDir != 0 ? str.tostring(pDir * (pExt - pEntry) / pAtr, "#.0") + " ATR" : "–", text_color=color.white)
+    table.cell(tbl, 0, 11, "Wzorce (duże ≥ " + str.tostring(bigK, "#.#") + " ATR)", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 11, str.tostring(nPat) + "  (" + str.tostring(nBig) + (nPat > 0 ? " = " + str.tostring(100.0 * nBig / nPat, "#") + " %" : "") + ")", text_color=color.white)
+    table.cell(tbl, 0, 12, "Śr. zasięg wzorca", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 12, nPat > 0 ? str.tostring(sumMf / nPat, "#.0") + " ATR" : "–", text_color=color.white)
+    table.cell(tbl, 0, 13, "Wariant", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 13, selVar, text_color=color.white, bgcolor=color.new(color.blue, 40))
+    for k = 0 to 1
+        float n = array.get(ksN, k)
+        float s = array.get(ksSum, k)
+        table.cell(tbl, 0, 14 + k, (k == 0 ? "START" : "Dokładki") + ": wejść / zysk. / R", text_color=color.white, text_halign=text.align_left)
+        table.cell(tbl, 1, 14 + k, str.tostring(n, "#") + " / " + (n > 0 ? str.tostring(100.0 * array.get(ksW, k) / n, "#") + " %" : "–") + " / " + str.tostring(s, "#.0") + " R",
+             text_color=color.white, bgcolor=s >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+    float eqP = array.get(eqA, 0) - 100
+    table.cell(tbl, 0, 16, "Kapitał przy " + str.tostring(riskPct, "#.##") + " % ryzyka", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 16, (eqP >= 0 ? "+" : "") + str.tostring(eqP, "#.0") + " %", text_color=color.white, bgcolor=eqP >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+    table.cell(tbl, 0, 17, "Max obsunięcie kapitału", text_color=color.white, text_halign=text.align_left)
+    table.cell(tbl, 1, 17, str.tostring(array.get(eqA, 2), "#.0") + " %", text_color=color.white)
+
+if showCmp and barstate.islast
+    color hd = color.new(color.gray, 30)
+    f_cell(0, 0, "Wariant", hd)
+    f_cell(1, 0, "Wejść", hd)
+    f_cell(2, 0, "Zysk.", hd)
+    f_cell(3, 0, "Suma R", hd)
+    f_cell(4, 0, "Śr. R", hd)
+    f_cell(5, 0, "Max DD R", hd)
+    f_cell(6, 0, "Seria strat", hd)
+    for v = 0 to NV - 1
+        float n  = array.get(vsN, v)
+        float sm = array.get(vsSum, v)
+        color bg = v == selIdx ? color.new(color.blue, 50) : color.new(color.black, 30)
+        color rc = sm >= 0 ? color.new(color.green, 40) : color.new(color.red, 40)
+        f_cell(0, v + 1, (v == selIdx ? "► " : "") + array.get(varNames, v), bg)
+        f_cell(1, v + 1, str.tostring(n, "#"), bg)
+        f_cell(2, v + 1, n > 0 ? str.tostring(100.0 * array.get(vsW, v) / n, "#") + " %" : "–", bg)
+        f_cell(3, v + 1, str.tostring(sm, "#.0"), rc)
+        f_cell(4, v + 1, n > 0 ? str.tostring(sm / n, "#.00") : "–", rc)
+        f_cell(5, v + 1, str.tostring(array.get(vsDD, v), "#.0"), bg)
+        f_cell(6, v + 1, str.tostring(array.get(vsMStr, v), "#"), bg)
 
 // ───────────────────────── Alerty ─────────────────────────
 alertcondition(prepS and not prepS[1], "HTS Start: PRZYGOTOWANIE short", "HTS Start: buduje się short {{ticker}} @ {{close}}")

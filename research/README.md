@@ -21,3 +21,13 @@ python research/hts_backtest.py --synthetic                                 # ko
   Liczy się wynik na **teście** – trening zawsze wygląda dobrze.
 - `t` to istotność średniego wyniku w R. Poniżej ~2 wynik nie odróżnia się od przypadku.
 - Kontrola na losowym rynku musi dawać wyniki wokół zera – jeśli nie, backtester ma błąd (zagląda w przyszłość).
+
+## Wczesne wykrywanie trendu (`hts_trendstart.py`)
+Ta sama logika co `HTS_TrendStart.pine`: starty, dokładki i 6 wariantów zarządzania pozycją na tych samych sygnałach.
+```
+python research/hts_trendstart.py --data dax_1m.csv --src-tz UTC --cost 1.5   # koszt na wejście w punktach
+python research/hts_trendstart.py --synthetic                                 # kontrola: losowy rynek
+```
+Wynik dzielony na pierwszą połowę (trening) i drugą (test). Na losowym rynku wszystkie warianty dają ok. 0 R
+(lekko poniżej, bo SL liczony jest przed TP), a po kosztach są na minusie – zarządzanie zmienia obsunięcie
+i skuteczność, ale nie tworzy przewagi.
