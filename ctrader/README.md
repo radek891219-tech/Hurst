@@ -7,8 +7,7 @@
 | `HTS_ScaleIn_FTMO.cs` | Wersja HTS z uśrednianiem wejścia: kilka wejść, wspólny SL, stałe ryzyko kampanii |
 | `HTS_Hurst_Signals_Indicator.cs` | Wskaźnik HTS + Hurst: wstęgi, pasma Hursta i strzałki sygnałów (rozchodzące się wstęgi + dotknięcie pasma) |
 | `HTS_Hurst_Bot.cs` | cBot grający sygnały HTS + Hurst – do backtestu (ryzyko w $, SL za pasmem ekstremalnym, TP w R, FTMO) |
-| `HTS_TrendStart_Indicator.cs` | Wczesne wykrywanie trendu (jak `HTS_TrendStart.pine`): kółko = przygotowanie, strzałka START, ramka wzorca, romb = dokładka, panel z checklistą i porównaniem 6 wariantów zarządzania |
-| `HTS_TrendStart_Bot.cs` | cBot do wczesnego wykrywania trendu: START + dokładki do wygrywającej pozycji, wybrany wariant zarządzania, ryzyko w $, okno handlu, FTMO – do backtestu z prawdziwym spreadem |
+| `HTS_TrendStart_Bot.cs` | Strategia (cBot) wczesnego wykrywania trendu: START + dokładki do wygrywającej pozycji, wybrany wariant zarządzania, ryzyko w $, okno handlu, FTMO. Bez rysowania na wykresie |
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
 
 ## Ochrona FTMO (grupa `=== FTMO PROTECTION ===`)
@@ -41,6 +40,6 @@
 - FTMO: kampania startuje tylko, jeśli jej pełne ryzyko mieści się w dziennym limicie.
 
 ## HTS Trend Start (wczesne wykrywanie trendu)
-- **Wskaźnik** liczy wszystko na zamkniętych świecach. Panel w prawym górnym rogu: checklista warunków, status, statystyka wzorców i wynik wybranego wariantu. Prawy dolny róg: porównanie 6 wariantów zarządzania. Koszt wejścia (`Cost per entry`) wpisz w pipsach, inaczej wynik jest zawyżony.
-- **cBot** gra jeden wybrany wariant (`Management`). Częściowe TP i BE działają na ticku, trailing za szybką wstęgą, stop czasowy i koniec wzorca – na zamknięciu świecy. Dokładki tylko, gdy START jest otwarty i ma już `PbNeedR` R zysku.
-- Jak sprawdzić, czy to jest na plusie: backtest cBota na GER40 m1 (dane tickowe, 1–2 lata), osobno dla każdego wariantu `Management`. Ustaw parametry na pierwszym roku, a ocenę rób na drugim.
+- Strategia gra jeden wybrany wariant (`Management`). Częściowe TP i BE działają na ticku, trailing za szybką wstęgą, stop czasowy i koniec wzorca – na zamknięciu świecy. Dokładki tylko, gdy START jest otwarty i ma już `PbNeedR` R zysku.
+- W logu (zakładka Log) bot wypisuje każdy START i powód, jeśli nie otworzył pozycji (poza oknem handlu, blokada FTMO, za mały wolumen). Na końcu backtestu: liczba sygnałów i otwartych pozycji.
+- Jak sprawdzić, czy to jest na plusie: backtest na GER40 m1 (dane tickowe, 1–2 lata), osobno dla każdego wariantu `Management`. Parametry ustaw na pierwszym roku, ocenę rób na drugim.
