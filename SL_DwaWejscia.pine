@@ -1,0 +1,118 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// SL 100 $ – 1 wejście vs 2 wejścia
+//  • od aktualnej ceny (albo od ceny wpisanej ręcznie) rysuje strefę SL o stałej odległości
+//  • lewy prostokąt: jedno wejście na aktualnej cenie, SL = ryzyko (domyślnie 100 $)
+//  • prawy prostokąt: ten sam SL w tym samym miejscu, ale dwa wejścia:
+//      wejście 1 na aktualnej cenie + wejście 2 w X% drogi do SL; łączne ryzyko to też 100 $
+//  • etykiety pokazują loty, ryzyko i średnią cenę dla obu wariantów
+// Rysunki są na prawo od ostatniej świecy i przesuwają się za ceną na żywo.
+//@version=5
+indicator("SL 100$ – 1 vs 2 wejścia", shorttitle="SL 2W", overlay=true, max_boxes_count=10, max_lines_count=20, max_labels_count=20)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpP = "=== POZYCJA ==="
+dir     = input.string("Long", "Kierunek", options=["Long", "Short"], group=grpP)
+entryIn = input.float(0.0, "Cena wejścia (0 = aktualna cena)", minval=0, group=grpP, tooltip="Zostaw 0, żeby wszystko liczyło się od bieżącej ceny. Wpisz cenę, żeby zamrozić układ na konkretnym poziomie.")
+slPts   = input.float(100, "Odległość SL (pkt)", minval=0.01, group=grpP, tooltip="Odległość wejścia 1 od SL w punktach ceny. Dla GER40 1 pkt = 1.0 na wykresie.")
+risk    = input.float(100, "Ryzyko ($)", minval=0.01, group=grpP, tooltip="Strata na SL. W wariancie z dwoma wejściami to strata, gdy wypełnią się oba.")
+pv      = input.float(1.0, "$ za 1 pkt przy 1 locie", minval=0.000001, group=grpP, tooltip="Ile zarabiasz/tracisz na 1 punkcie przy 1 locie. Sprawdź w specyfikacji symbolu u brokera (GER40 zwykle ok. 1 € za pkt, przelicz na $).")
+lotStep = input.float(0.01, "Krok lota", minval=0.000001, group=grpP, tooltip="Loty są zaokrąglane w dół do tego kroku, więc ryzyko nigdy nie przekracza ustawionego.")
+
+grp2 = "=== DRUGIE WEJŚCIE ==="
+e2Pct = input.float(50, "Wejście 2: % drogi do SL", minval=1, maxval=99, group=grp2, tooltip="50 = wejście 2 w połowie między wejściem 1 a SL.")
+split = input.string("Równe loty", "Podział", options=["Równe loty", "Równe ryzyko"], group=grp2, tooltip="Równe loty: oba wejścia mają ten sam lot.\nRówne ryzyko: każde wejście ryzykuje połowę kwoty, więc wejście 2 (bliżej SL) ma większy lot.")
+
+grpV = "=== WYGLĄD ==="
+gap      = input.int(10, "Odstęp od ostatniej świecy (świece)", minval=0, group=grpV)
+boxW     = input.int(40, "Szerokość prostokąta (świece)", minval=2, group=grpV)
+space    = input.int(15, "Odstęp między prostokątami (świece)", minval=0, group=grpV)
+slCol    = input.color(color.new(#f4a582, 65), "Kolor strefy SL", group=grpV)
+entryCol = input.color(color.gray, "Kolor linii wejścia", group=grpV)
+e2Col    = input.color(color.blue, "Kolor linii wejścia 2", group=grpV)
+avgCol   = input.color(color.orange, "Kolor średniej ceny", group=grpV)
+slLnCol  = input.color(color.red, "Kolor linii SL", group=grpV)
+extLine  = input.bool(true, "Linia wejścia przez cały wykres", group=grpV)
+showAvg  = input.bool(true, "Pokaż średnią cenę (2 wejścia)", group=grpV)
+showLbl  = input.bool(true, "Pokaż etykiety", group=grpV)
+
+// ───────────────────────── Obliczenia ─────────────────────────
+isLong = dir == "Long"
+sgn    = isLong ? 1.0 : -1.0
+
+e1 = entryIn > 0 ? entryIn : close
+sl = e1 - sgn * slPts
+d2 = slPts * (1 - e2Pct / 100.0)          // odległość wejścia 2 od SL
+e2 = sl + sgn * d2
+
+f_lot(x) => math.max(math.floor(x / lotStep + 1e-9) * lotStep, 0.0)
+f_px(x)  => str.tostring(x, format.mintick)
+f_lt(x)  => str.tostring(x, "#.###")
+f_usd(x) => str.tostring(x, "#.##") + " $"
+
+// Wariant A: jedno wejście
+lotA  = f_lot(risk / (slPts * pv))
+riskA = lotA * slPts * pv
+
+// Wariant B: dwa wejścia, wspólny SL
+float lotB1 = na
+float lotB2 = na
+if split == "Równe loty"
+    l = f_lot(risk / ((slPts + d2) * pv))
+    lotB1 := l
+    lotB2 := l
+else
+    lotB1 := f_lot(risk * 0.5 / (slPts * pv))
+    lotB2 := f_lot(risk * 0.5 / (d2 * pv))
+riskB1 = lotB1 * slPts * pv                // strata, gdy wypełni się tylko wejście 1
+riskB  = riskB1 + lotB2 * d2 * pv          // strata, gdy wypełnią się oba
+lotB   = lotB1 + lotB2
+avgB   = lotB > 0 ? (lotB1 * e1 + lotB2 * e2) / lotB : na
+
+// ───────────────────────── Rysowanie ─────────────────────────
+if barstate.islast
+    for b in box.all
+        box.delete(b)
+    for ln in line.all
+        line.delete(ln)
+    for lb in label.all
+        label.delete(lb)
+
+    xA1 = bar_index + gap
+    xA2 = xA1 + boxW
+    xB1 = xA2 + space
+    xB2 = xB1 + boxW
+    top = math.max(e1, sl)
+    bot = math.min(e1, sl)
+    brd = color.new(slCol, 20)
+
+    // strefy SL
+    box.new(xA1, top, xA2, bot, border_color=brd, bgcolor=slCol)
+    box.new(xB1, top, xB2, bot, border_color=brd, bgcolor=slCol)
+
+    // wejście 1 (wspólne dla obu wariantów)
+    line.new(extLine ? bar_index : xA1, e1, xB2, e1, color=entryCol, width=2, extend=extLine ? extend.both : extend.none)
+    // SL (ten sam poziom w obu wariantach)
+    line.new(xA1, sl, xA2, sl, color=slLnCol, width=2)
+    line.new(xB1, sl, xB2, sl, color=slLnCol, width=2)
+    // wejście 2 tylko w prawym prostokącie
+    line.new(xB1, e2, xB2, e2, color=e2Col, width=2)
+    if showAvg and not na(avgB)
+        line.new(xB1, avgB, xB2, avgB, color=avgCol, width=1, style=line.style_dashed)
+
+    if showLbl
+        txt = chart.fg_color
+        // ceny po prawej stronie
+        label.new(xB2, e1, "Wejście 1  " + f_px(e1), style=label.style_label_left, color=color.new(color.black, 100), textcolor=txt, size=size.small)
+        label.new(xB2, e2, "Wejście 2  " + f_px(e2), style=label.style_label_left, color=color.new(color.black, 100), textcolor=e2Col, size=size.small)
+        label.new(xB2, sl, "SL  " + f_px(sl), style=label.style_label_left, color=color.new(color.black, 100), textcolor=slLnCol, size=size.small)
+        if showAvg and not na(avgB)
+            label.new(xB2, avgB, "Średnia  " + f_px(avgB), style=label.style_label_left, color=color.new(color.black, 100), textcolor=avgCol, size=size.small)
+
+        // podsumowania pod/nad strefą SL (po stronie SL)
+        lblStyle = isLong ? label.style_label_up : label.style_label_down
+        txtA = "1 WEJŚCIE\nLot " + f_lt(lotA) + "\nRyzyko " + f_usd(riskA)
+        txtB = "2 WEJŚCIA (" + split + ")\nLot " + f_lt(lotB1) + " + " + f_lt(lotB2) + " = " + f_lt(lotB) + "\nRyzyko (oba) " + f_usd(riskB) + "\nRyzyko (tylko W1) " + f_usd(riskB1)
+        label.new(math.round((xA1 + xA2) / 2), sl, txtA, style=lblStyle, color=color.new(slCol, 10), textcolor=txt, size=size.small)
+        label.new(math.round((xB1 + xB2) / 2), sl, txtB, style=lblStyle, color=color.new(slCol, 10), textcolor=txt, size=size.small)
+        if lotA <= 0 or lotB1 <= 0 or lotB2 <= 0
+            label.new(xA1, e1, "Lot = 0: zwiększ ryzyko albo zmniejsz krok lota / SL", style=label.style_label_down, color=color.new(color.red, 0), textcolor=color.white, size=size.small)

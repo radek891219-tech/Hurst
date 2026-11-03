@@ -11,6 +11,7 @@ Dwa skrypty:
 | `HTS_ScaleIn_Strategy.pine` | HTS Scale-In jako strategia TradingView – wynik liczy Strategy Tester (zlecenia rynkowe i limit, SL, TP1, trailing, FTMO) |
 | `HTS_ScaleIn_TV.pine` | HTS z uśrednianiem wejścia na TradingView: kampania kilku wejść, wspólny SL, ryzyko kampanii 300 $, statystyki |
 | `HTS_Strategy_TV.pine` | Strategia HTS (cBot cTrader) na TradingView: pasma H1 i m1, trend, pullback, wejścia, SL/TP1, trailing, ochrona FTMO, statystyki |
+| `SL_DwaWejscia.pine` | Kalkulator pozycji na wykresie: od aktualnej ceny strefa SL za stałe ryzyko (100 $) – obok ten sam SL z dwoma wejściami (drugie w połowie drogi do SL), loty, ryzyko i średnia cena |
 | `HurstScalper_1m.pine` | Szybki scalper na MNQ/NQ: wejścia z trendem i z odbicia wg reżimu Hursta, TP/SL w $, symulacja wyników po kosztach, dzienny limit |
 
 ## Instalacja
