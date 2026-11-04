@@ -1,0 +1,288 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// HTS Grid – uśrednianie na wstęgach HTS (te same zasady co ctrader/HTS_Grid_Bot.cs)
+//  • wstęgi HTS z High i Low; trend = szybka cała nad wolną (long) / cała pod wolną (short) – tylko w kierunku crossa,
+//  • koszyk zleceń limit od szybkiej do wolnej wstęgi, kolejne zlecenia większe (ostatnie = X × pierwsze),
+//  • wspólny SL: szerokość wolnej wstęgi za wolną wstęgą,
+//  • wielkości tak, by pełny koszyk na SL tracił dokładnie „Ryzyko koszyka” – wskaźnik pokazuje loty na każdym poziomie,
+//  • dopóki nic się nie wypełniło, zlecenia idą za wstęgami; po pierwszym wypełnieniu poziomy są stałe,
+//  • cel: R-krotność FAKTYCZNEJ straty wypełnionych zleceń, od średniej ceny,
+//  • cross w drugą stronę zamyka wszystko; po SL nowy koszyk dopiero po nowym crossie,
+//  • test na historii wykresu z kosztem na każde zlecenie (bez piątkowego zamykania i limitu dziennego z cBota).
+// Ustawienia domyślne: GERMANY 40 m1, 89 / 298 Wilder, 3 zlecenia (1 : 1.5 : 2), ryzyko 112 $, cel 1.7R.
+//@version=5
+indicator("HTS Grid – uśrednianie na wstęgach", shorttitle="HTS Grid", overlay=true, max_lines_count=100, max_labels_count=100)
+
+// ───────────────────────── Ustawienia ─────────────────────────
+grpB = "=== Wstęgi HTS ==="
+fastLen = input.int(89, "Szybka wstęga", minval=2, group=grpB)
+slowLen = input.int(298, "Wolna wstęga", minval=2, group=grpB)
+maType  = input.string("Wilder", "Typ średniej", options=["Wilder", "EMA", "SMA"], group=grpB)
+dirSel  = input.string("Oba", "Kierunek", options=["Oba", "Tylko long", "Tylko short"], group=grpB)
+
+grpG = "=== Koszyk ==="
+nLv     = input.int(3, "Liczba zleceń w koszyku", minval=1, maxval=10, group=grpG)
+lastM   = input.float(2.0, "Ostatnie zlecenie vs pierwsze (x)", minval=0.2, maxval=10, step=0.1, group=grpG)
+zoneEnd = input.float(1.0, "Koniec strefy (0 = szybka, 1 = wolna wstęga)", minval=0, maxval=2, step=0.1, group=grpG)
+slMult  = input.float(1.0, "SL za wolną wstęgą (x szerokości wolnej)", minval=0.1, maxval=5, step=0.1, group=grpG)
+needX   = input.bool(true, "Po SL nowy koszyk dopiero po nowym crossie", group=grpG)
+
+grpR = "=== Ryzyko i cel ==="
+riskCash = input.float(112, "Ryzyko koszyka ($, pełne wypełnienie na SL)", minval=1, group=grpR)
+tpR      = input.float(1.7, "Cel (R faktycznej straty, 0 = tylko cross)", minval=0, step=0.1, group=grpR)
+ptVal    = input.float(1.0, "Wartość 1 punktu przy 1 locie ($)", minval=0.0001, group=grpR, tooltip="Sprawdź w specyfikacji symbolu u brokera, ile $ daje ruch o 1 punkt przy 1 locie. Potrzebne tylko do wyliczenia lotów.")
+lotStep  = input.float(0.01, "Krok lota", minval=0.0001, group=grpR)
+costPts  = input.float(1.5, "Koszt na zlecenie w teście (punkty: spread + prowizja)", minval=0, step=0.1, group=grpR)
+
+grpV = "=== Wygląd ==="
+showLv  = input.bool(true, "Poziomy koszyka, SL i cel", group=grpV)
+showMk  = input.bool(true, "Znaczniki końca koszyka (cel / SL / cross)", group=grpV)
+showTbl = input.bool(true, "Tabela", group=grpV)
+
+// ───────────────────────── Wstęgi ─────────────────────────
+f_ma(float src, simple int n) =>
+    float r = ta.rma(src, n)
+    float e = ta.ema(src, n)
+    float s = ta.sma(src, n)
+    maType == "Wilder" ? r : maType == "EMA" ? e : s
+
+fH = f_ma(high, fastLen)
+fL = f_ma(low,  fastLen)
+sH = f_ma(high, slowLen)
+sL = f_ma(low,  slowLen)
+tr = fL > sH ? 1 : fH < sL ? -1 : 0
+
+// wartości z zamkniętej poprzedniej świecy – na nich stoją zlecenia w bieżącej świecy
+tr1   = tr[1]
+wid1  = sH[1] - sL[1]
+aLong = fH[1]
+bLong = sH[1]
+sLong = sL[1] - slMult * wid1
+aShrt = fL[1]
+bShrt = sL[1]
+sShrt = sH[1] + slMult * wid1
+c1    = close[1]
+
+// ───────────────────────── Koszyk ─────────────────────────
+var array<float> wN  = array.new<float>()
+var array<float> lvA = array.new<float>()
+var array<float> unA = array.new<float>()       // R na punkt (pełny koszyk na SL = 1R)
+var array<float> enA = array.new<float>(10, na)
+var array<bool>  flA = array.new<bool>(10, false)
+// statystyka: n, suma R, suma R², wygrane, skumulowane, szczyt, max DD, cel, SL, cross
+var array<float> st  = array.new<float>(10, 0.0)
+
+if barstate.isfirst
+    float ws = 0.0
+    for k = 0 to nLv - 1
+        float w = nLv == 1 ? 1.0 : 1.0 + (lastM - 1.0) * k / (nLv - 1)
+        array.push(wN, w)
+        ws += w
+    for k = 0 to nLv - 1
+        array.set(wN, k, array.get(wN, k) / ws)
+
+f_make(int dd, float a, float b, float s) =>
+    bool ok = true
+    array.clear(lvA)
+    array.clear(unA)
+    for k = 0 to nLv - 1
+        float p = nLv == 1 ? 0.0 : zoneEnd * k / (nLv - 1)
+        float lv = a + (b - a) * p
+        float dist = dd * (lv - s)
+        if dist <= 0
+            ok := false
+        array.push(lvA, lv)
+        array.push(unA, dist > 0 ? array.get(wN, k) / dist : 0.0)
+    ok
+
+f_nf() =>
+    int n = 0
+    for k = 0 to nLv - 1
+        n += array.get(flA, k) ? 1 : 0
+    n
+
+f_pnl(int dd, float px) =>
+    float p = 0.0
+    for k = 0 to nLv - 1
+        if array.get(flA, k)
+            float u = array.get(unA, k)
+            p += u * dd * (px - array.get(enA, k)) - costPts * u
+    p
+
+f_agg(int dd, float s) =>
+    float su = 0.0
+    float se = 0.0
+    float rf = 0.0
+    for k = 0 to nLv - 1
+        if array.get(flA, k)
+            float u = array.get(unA, k)
+            float e = array.get(enA, k)
+            su += u
+            se += u * e
+            rf += u * dd * (e - s)
+    [rf, su > 0 ? se / su : na, su]
+
+f_rec(float r, int kind) =>
+    array.set(st, 0, array.get(st, 0) + 1)
+    array.set(st, 1, array.get(st, 1) + r)
+    array.set(st, 2, array.get(st, 2) + r * r)
+    array.set(st, 3, array.get(st, 3) + (r > 0 ? 1 : 0))
+    float cum = array.get(st, 4) + r
+    array.set(st, 4, cum)
+    array.set(st, 5, math.max(array.get(st, 5), cum))
+    array.set(st, 6, math.max(array.get(st, 6), array.get(st, 5) - cum))
+    array.set(st, 7 + kind, array.get(st, 7 + kind) + 1)
+    true
+
+f_dirOk(int t) =>
+    dirSel == "Oba" or (t == 1 and dirSel == "Tylko long") or (t == -1 and dirSel == "Tylko short")
+
+var int   d        = 0
+var int   blocked  = 0
+var int   lastFill = -1
+var float slB      = na
+
+bool evTp = false
+bool evSl = false
+bool evX  = false
+
+if bar_index > slowLen * 3
+    if blocked != 0 and tr1 != blocked
+        blocked := 0
+    // unieważnienie: cross w drugą stronę / koniec trendu
+    if d != 0 and tr1 != d
+        if f_nf() > 0
+            f_rec(f_pnl(d, open), 2)
+            evX := true
+        d := 0
+    // nowy koszyk albo przesunięcie niewypełnionego za wstęgami
+    if d == 0 and tr1 != 0 and tr1 != blocked and f_dirOk(tr1)
+        bool ok = false
+        if tr1 == 1
+            ok := f_make(1, aLong, bLong, sLong)
+        else
+            ok := f_make(-1, aShrt, bShrt, sShrt)
+        if ok
+            d := tr1
+            slB := tr1 == 1 ? sLong : sShrt
+            for k = 0 to 9
+                array.set(flA, k, false)
+                array.set(enA, k, na)
+    else if d != 0 and f_nf() == 0
+        bool ok = false
+        if d == 1
+            ok := f_make(1, aLong, bLong, sLong)
+        else
+            ok := f_make(-1, aShrt, bShrt, sShrt)
+        slB := d == 1 ? sLong : sShrt
+        if not ok
+            d := 0
+    if d != 0
+        // wypełnienia limitów
+        for k = 0 to nLv - 1
+            if not array.get(flA, k)
+                float lv = array.get(lvA, k)
+                bool side = d == 1 ? c1 > lv : c1 < lv
+                if side and (d == 1 ? low <= lv : high >= lv)
+                    array.set(enA, k, d == 1 ? math.min(open, lv) : math.max(open, lv))
+                    array.set(flA, k, true)
+                    lastFill := bar_index
+        if f_nf() > 0
+            [rf, avg, su] = f_agg(d, slB)
+            float tp = tpR > 0 ? avg + d * tpR * rf / su : na
+            float ex = na
+            if d == 1 ? low <= slB : high >= slB
+                ex := d == 1 ? math.min(open, slB) : math.max(open, slB)
+                evSl := true
+                if needX
+                    blocked := d
+            else if tpR > 0 and bar_index > lastFill and (d == 1 ? high >= tp : low <= tp)
+                ex := d == 1 ? math.max(open, tp) : math.min(open, tp)
+                evTp := true
+            if not na(ex)
+                f_rec(f_pnl(d, ex), evTp ? 0 : 1)
+                d := 0
+
+// ───────────────────────── Wykres ─────────────────────────
+pFH = plot(fH, "Szybka – góra", color=color.new(color.teal, 0))
+pFL = plot(fL, "Szybka – dół",  color=color.new(color.teal, 0))
+pSH = plot(sH, "Wolna – góra",  color=color.new(color.red, 20))
+pSL = plot(sL, "Wolna – dół",   color=color.new(color.red, 20))
+fill(pFH, pFL, color=color.new(color.teal, 65), title="Wstęga szybka")
+fill(pSH, pSL, color=color.new(color.red, 70), title="Wstęga wolna")
+
+plotshape(showMk and evTp, "Cel", shape.circle,  location.abovebar, color.new(color.green, 0), size=size.tiny, text="TP", textcolor=color.green)
+plotshape(showMk and evSl, "SL",  shape.xcross,  location.belowbar, color.new(color.red, 0),   size=size.tiny, text="SL", textcolor=color.red)
+plotshape(showMk and evX,  "Cross", shape.diamond, location.abovebar, color.new(color.gray, 0), size=size.tiny, text="X", textcolor=color.gray)
+
+// poziomy bieżącego koszyka
+f_lots(float u) =>
+    math.floor(riskCash * u / ptVal / lotStep) * lotStep
+
+var array<line>  lns = array.new<line>()
+var array<label> lbs = array.new<label>()
+if barstate.islast
+    for ln in lns
+        line.delete(ln)
+    for lb in lbs
+        label.delete(lb)
+    array.clear(lns)
+    array.clear(lbs)
+    if showLv and d != 0
+        int x1 = bar_index - 30
+        int x2 = bar_index + 15
+        for k = 0 to nLv - 1
+            float lv = array.get(lvA, k)
+            bool f = array.get(flA, k)
+            color cl = color.from_gradient(k, 0, math.max(nLv - 1, 1), color.teal, color.red)
+            array.push(lns, line.new(x1, lv, x2, lv, color=cl, width=f ? 2 : 1, style=f ? line.style_solid : line.style_dashed))
+            array.push(lbs, label.new(x2, lv, str.tostring(k + 1) + ": " + str.tostring(f_lots(array.get(unA, k)), "0.00") + " lota @ " + str.tostring(lv, format.mintick) + (f ? "  ✔" : ""),
+                 style=label.style_label_left, color=color.new(cl, 30), textcolor=color.white, size=size.small))
+        array.push(lns, line.new(x1, slB, x2, slB, color=color.red, width=2))
+        array.push(lbs, label.new(x2, slB, "SL " + str.tostring(slB, format.mintick), style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small))
+        if f_nf() > 0 and tpR > 0
+            [rf, avg, su] = f_agg(d, slB)
+            float tp = avg + d * tpR * rf / su
+            array.push(lns, line.new(x1, tp, x2, tp, color=color.green, width=2))
+            array.push(lbs, label.new(x2, tp, "Cel " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.small))
+
+// ───────────────────────── Tabela ─────────────────────────
+var table tbl = table.new(position.top_right, 2, 12, bgcolor=color.new(color.black, 20), border_width=1)
+
+f_row(int r, string a, string b, color bg) =>
+    table.cell(tbl, 0, r, a, text_color=color.white, text_halign=text.align_left, text_size=size.small)
+    table.cell(tbl, 1, r, b, text_color=color.white, bgcolor=bg, text_size=size.small)
+
+if showTbl and barstate.islast
+    color bg = color.new(color.black, 30)
+    int nf = d != 0 ? f_nf() : 0
+    float planned = 0.0
+    float actual = 0.0
+    if d != 0
+        for k = 0 to nLv - 1
+            float lots = f_lots(array.get(unA, k))
+            float lv = array.get(lvA, k)
+            planned += lots * math.abs(lv - slB) * ptVal
+            if array.get(flA, k)
+                actual += lots * d * (array.get(enA, k) - slB) * ptVal
+    string wTxt = ""
+    for k = 0 to nLv - 1
+        wTxt += (k > 0 ? " : " : "") + str.tostring(array.get(wN, k) / array.get(wN, 0), "0.##")
+    float n = array.get(st, 0)
+    float sm = array.get(st, 1)
+    float m = n > 0 ? sm / n : na
+    float sd = n > 1 ? math.sqrt(math.max(array.get(st, 2) / n - m * m, 0) * n / (n - 1)) : na
+    float t = n > 1 and sd > 0 ? m / (sd / math.sqrt(n)) : na
+
+    f_row(0, "HTS Grid", str.tostring(fastLen) + "/" + str.tostring(slowLen) + " " + maType + ", " + str.tostring(nLv) + " zlec. (" + wTxt + "), cel " + str.tostring(tpR, "0.0") + "R", color.new(color.blue, 40))
+    f_row(1, "Trend", tr == 1 ? "LONG" : tr == -1 ? "SHORT" : "BRAK (wstęgi na sobie)", tr == 1 ? color.new(color.green, 30) : tr == -1 ? color.new(color.red, 30) : bg)
+    string bTxt = d != 0 ? (d == 1 ? "LONG" : "SHORT") + ": wypełnione " + str.tostring(nf) + " / " + str.tostring(nLv) : blocked != 0 ? "po SL – czekam na nowy cross" : "brak"
+    f_row(2, "Koszyk", bTxt, d != 0 ? color.new(color.orange, 30) : bg)
+    f_row(3, "Strata przy pełnym koszyku", d != 0 ? str.tostring(planned, "0") + " $ (plan " + str.tostring(riskCash, "0") + " $)" : "–", bg)
+    f_row(4, "Faktyczna strata na SL", nf > 0 ? str.tostring(actual, "0") + " $" : "–", bg)
+    f_row(5, "Historia: koszyków", str.tostring(n, "0") + "  (cel " + str.tostring(array.get(st, 7), "0") + " / SL " + str.tostring(array.get(st, 8), "0") + " / cross " + str.tostring(array.get(st, 9), "0") + ")", bg)
+    f_row(6, "Średnio na koszyk", na(m) ? "–" : (m >= 0 ? "+" : "") + str.tostring(m, "0.000") + " R  (t " + (na(t) ? "–" : str.tostring(t, "0.0")) + ")", na(t) or math.abs(t) < 2 ? bg : t < 0 ? color.new(color.red, 30) : color.new(color.green, 30))
+    f_row(7, "Suma", (sm >= 0 ? "+" : "") + str.tostring(sm, "0.0") + " R = " + str.tostring(sm * riskCash, "0") + " $", sm >= 0 ? color.new(color.green, 40) : color.new(color.red, 40))
+    f_row(8, "Skuteczność", n > 0 ? str.tostring(100 * array.get(st, 3) / n, "0") + " %" : "–", bg)
+    f_row(9, "Max obsunięcie", str.tostring(array.get(st, 6), "0.0") + " R = " + str.tostring(array.get(st, 6) * riskCash, "0") + " $", bg)
+    f_row(10, "Koszt w teście", str.tostring(costPts, "0.0") + " pkt na zlecenie", bg)
+    f_row(11, "Uwaga", "|t| < 2 = nie do odróżnienia od przypadku; krótka historia m1 = mała próba", bg)

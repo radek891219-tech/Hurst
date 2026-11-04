@@ -9,6 +9,7 @@ Dwa skrypty:
 | `HurstWaves_1m.pine` | Miernik fal: średnia/mediana ostatnich N fal w górę i w dół (pkt, $, świece), postęp obecnej fali, prognoza, wejście na końcu typowej korekty; filtry cofnięcia, wolumenu (świeca wejścia, kulminacja, siła fal) i VWAP |
 | `HTS_Hurst_Signals.pine` | HTS + Hurst: sygnały tylko gdy wstęgi HTS się rozchodzą i cena dotyka pasma Hursta po przeciwnej stronie trendu; SL/TP i statystyka |
 | `HTS_TrendStart.pine` | HTS – wczesne wykrywanie trendu: checklista warunków, PRZYGOTOWANIE (brakuje 1), START, ramka rysowana na bieżąco, dokładki tylko do wygrywającej pozycji, porównanie 6 sposobów zarządzania pozycją (R, obsunięcie, serie strat) i krzywa kapitału przy stałym % ryzyka. Strategia do cTradera: `ctrader/HTS_TrendStart_Bot.cs` |
+| `HTS_Grid.pine` | HTS Grid – uśrednianie na wstęgach: koszyk limitów od szybkiej do wolnej wstęgi, wspólny SL, loty na każdym poziomie z ryzyka koszyka, cel w R od faktycznej straty, test na historii z kosztem. Strategia do cTradera: `ctrader/HTS_Grid_Bot.cs` |
 | `HTS_ScaleIn_Strategy.pine` | HTS Scale-In jako strategia TradingView – wynik liczy Strategy Tester (zlecenia rynkowe i limit, SL, TP1, trailing, FTMO) |
 | `HTS_ScaleIn_TV.pine` | HTS z uśrednianiem wejścia na TradingView: kampania kilku wejść, wspólny SL, ryzyko kampanii 300 $, statystyki |
 | `HTS_Strategy_TV.pine` | Strategia HTS (cBot cTrader) na TradingView: pasma H1 i m1, trend, pullback, wejścia, SL/TP1, trailing, ochrona FTMO, statystyki |
