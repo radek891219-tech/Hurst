@@ -8,7 +8,14 @@
 | `HTS_Hurst_Signals_Indicator.cs` | Wskaźnik HTS + Hurst: wstęgi, pasma Hursta i strzałki sygnałów (rozchodzące się wstęgi + dotknięcie pasma) |
 | `HTS_Hurst_Bot.cs` | cBot grający sygnały HTS + Hurst – do backtestu (ryzyko w $, SL za pasmem ekstremalnym, TP w R, FTMO) |
 | `HTS_TrendStart_Bot.cs` | Strategia (cBot) wczesnego wykrywania trendu: START + dokładki do wygrywającej pozycji, wybrany wariant zarządzania, ryzyko w $, okno handlu, FTMO. Bez rysowania na wykresie |
+| `HTS_Grid_Bot.cs` | HTS Grid – uśrednianie na wstęgach: koszyk limitów od szybkiej do wolnej wstęgi (np. 1/3 + 2/3), wspólny SL za wolną wstęgą, stałe ryzyko koszyka, cel w R od faktycznej straty, cross zamyka wszystko, po SL czeka na nowy cross, bezpiecznik dzienny |
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
+
+## HTS Grid (uśrednianie na wstęgach)
+- Ryzyko liczone od najgorszego scenariusza: wszystkie zlecenia wypełnione i SL = `Risk per Basket`. Bot wypisuje w logu łączną stratę koszyka przy każdym nowym koszyku.
+- `Orders in Basket` = 2 i `Last Order Size vs First` = 2 → 1/3 na szybkiej + 2/3 na wolnej (wariant z odcinka). `Last Order Size` = 1 → równe zlecenia.
+- Cel ustawiany jako TP na wszystkich pozycjach po każdym wypełnieniu: `Target` × faktyczna strata wypełnionych zleceń, od średniej ceny.
+- Test na DAX 2010–2018 (`research/hts_grid.py`): na M5–H4 wszystkie warianty na minusie po koszcie, grid ≈ pojedyncze wejście. Przed graniem zrób backtest w cTraderze na nowszych danych.
 
 ## Ochrona FTMO (grupa `=== FTMO PROTECTION ===`)
 - **Max Daily Loss** – dzienny wynik = equity minus saldo z północy CET/CEST (jak liczy FTMO). Po przekroczeniu: zamknięcie pozycji bota i blokada wejść do końca dnia.

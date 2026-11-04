@@ -53,3 +53,16 @@ Wynik na DAX 1m z HistData (GRXEUR, XI 2010 – XII 2018), logika cBota HTS (1 w
 - domyślne 33/144 + 33/144: trening +0.11 R (t 1.2), test −0.12 R (t −1.3),
 - korelacja wyniku trening ↔ test między zestawami +0.24 – wybór średnich na historii prawie nic nie mówi o przyszłości.
 Wniosek: zmiana okresów średnich nie daje HTS przewagi na DAX; problem leży w samych sygnałach wejścia, nie w długości średnich.
+
+## HTS Grid – uśrednianie na wstęgach (`hts_grid.py`)
+```
+python research/hts_grid.py --data "GRXEUR/DAT_ASCII_GRXEUR_M1_*.csv" --src-tz Etc/GMT+5
+python research/hts_grid.py --synthetic        # kontrola: losowy rynek
+```
+Jedno wejście kontra koszyk 2 / 3 / 5 zleceń od szybkiej do wolnej wstęgi, wspólny SL (szerokość wolnej za wolną), ryzyko pełnego koszyka = 1R,
+cel 2R / 3R od faktycznej straty, cross zamyka, po SL czekanie na nowy cross. DAX 1m z HistData 2010–2018, trening do 2015, test 2016–2018.
+- Koszt 1.5 pkt na zlecenie: M5 od −0.07 do −0.18 R, M15 od −0.02 do −0.24 R (jeden wariant +0.06 R na teście, t 0.5), H1 od −0.10 do −0.30 R, H4 głównie na minusie.
+- Bez kosztów: M5 od −0.03 do −0.07 R, M15 i H1 dalej na minusie lub wokół zera – nie da się tego zrzucić na spread.
+- Grid ≈ pojedyncze wejście (różnice w granicach szumu); pełny koszyk wypełnia się w ~70 % koszyków i wygrywa w 13–24 %.
+- D1: 4–6 transakcji na okres – za mało, żeby cokolwiek stwierdzić.
+- Losowy rynek (`--synthetic`): wszystkie warianty ok. 0 R minus koszt – backtest nie zagląda w przyszłość.
