@@ -6,7 +6,7 @@
 //  Otwarcie USA liczone w czasie Nowego Jorku, więc przesunięcia zmiany czasu (marzec, październik) są uwzględnione.
 //  Tabela: korelacja, ile USA robi na 1% Europy, co USA robi po dużym ruchu Europy w górę / w dół,
 //  stabilność w 1. i 2. połowie historii oraz wniosek z istotnością (t). |t| < 2 = zależność nieodróżnialna od przypadku.
-//  Interwał wykresu: 30m lub niższy. Więcej historii = pewniejszy wynik (na 30m więcej dni niż na 5m).
+//  Interwał wykresu: 30m lub niższy. Więcej historii = pewniejszy wynik (30m daje najwięcej dni).
 //@version=5
 indicator("Europa vs USA – sesje", shorttitle="EU vs US", overlay=true)
 
@@ -112,6 +112,9 @@ f_col(float t) =>
     na(t) or math.abs(t) < 2 ? color.new(color.gray, 40) : t < 0 ? color.new(color.red, 30) : color.new(color.green, 30)
 
 var table tbl = table.new(position.top_right, 5, 11, bgcolor=color.new(color.black, 20), border_width=1)
+if barstate.isfirst
+    table.merge_cells(tbl, 1, 9, 4, 9)
+    table.merge_cells(tbl, 1, 10, 4, 10)
 
 f_cell(int c, int r, string txt, color bg) =>
     table.cell(tbl, c, r, txt, text_color=color.white, bgcolor=bg, text_size=size.small)
@@ -193,7 +196,6 @@ if showTbl and barstate.islast
                  : st == 2 ? "Europa: " + f_sg(100 * (usO / euO - 1), "0.00") + " %, USA od otwarcia: " + f_sg(100 * (close / usO - 1), "0.00") + " %"
                  : "Poza sesją"
     f_cell(0, 9, "Dziś", hd)
-    table.merge_cells(tbl, 1, 9, 4, 9)
     f_cell(1, 9, today, bg)
 
     // wniosek
@@ -202,10 +204,9 @@ if showTbl and barstate.islast
     bool conU = not na(tU) and tU >= 2
     bool conD = not na(tD) and tD <= -2
     bool stable = not na(mU1) and not na(mU2) and not na(mD1) and not na(mD2) and math.sign(mU1) == math.sign(mU2) and math.sign(mD1) == math.sign(mD2)
-    string verdict = n < 60 ? "Za mało dni (" + str.tostring(n) + ") – weź niższy interwał z dłuższą historią albo test w Pythonie"
+    string verdict = n < 60 ? "Za mało dni (" + str.tostring(n) + ") – przełącz na 30m (dłuższa historia) albo zrób test w Pythonie"
          : revU or revD ? "USA odwraca Europę" + (revU and revD ? " w obie strony" : revU ? " po wzrostach" : " po spadkach") + (stable ? " – w obu połowach" : " – ale NIE w obu połowach, ostrożnie")
          : conU or conD ? "USA kontynuuje ruch Europy" + (stable ? " – w obu połowach" : " – ale NIE w obu połowach, ostrożnie")
          : "Brak istotnej zależności (|t| < 2) – kierunek USA nie wynika z ruchu Europy"
     f_cell(0, 10, "Wniosek", hd)
-    table.merge_cells(tbl, 1, 10, 4, 10)
     f_cell(1, 10, verdict, revU or revD or conU or conD ? color.new(color.blue, 30) : bg)
