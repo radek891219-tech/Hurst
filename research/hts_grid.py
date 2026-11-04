@@ -48,13 +48,20 @@ def resample(df, tf):
 
 
 def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross=True,
-             trail="off", trail_from="full", tr_start=1.0, tr_dist=1.0, tr_buf=0.0):
+             trail="off", trail_from="full", tr_start=1.0, tr_dist=1.0, tr_buf=0.0,
+             max_per_day=0, fri_close_h=-1, day_tz="Europe/Prague", bands=None):
     """trail: off – stały cel; band – SL za szybką wstęgą; r – SL w odległości tr_dist R za najlepszą ceną.
     trail_from: full – trailing (zamiast celu) tylko po wypełnieniu całego koszyka, any – po każdym wypełnieniu.
-    Trailing startuje po zysku tr_start R (od faktycznej straty wypełnionych zleceń) i SL tylko się zacieśnia."""
+    Trailing startuje po zysku tr_start R (od faktycznej straty wypełnionych zleceń) i SL tylko się zacieśnia.
+    max_per_day: limit nowych koszyków na dzień (dzień w strefie day_tz, jak w cBocie), 0 = bez limitu.
+    fri_close_h: w piątek od tej godziny UTC wszystko zamknięte i brak nowych koszyków (jak w cBocie), -1 = wył.
+    bands: (fH, fL, sH, sL) z interwału strategii, wyrównane do df – zlecenia i SL/TP sprawdzane na drobniejszych świecach."""
     o, h, l, c = (df[k].values for k in ("open", "high", "low", "close"))
     H, L = df["high"], df["low"]
-    fH, fL, sH, sL = (rma(x, n).values for x, n in ((H, fast), (L, fast), (H, slow), (L, slow)))
+    if bands is None:
+        fH, fL, sH, sL = (rma(x, n).values for x, n in ((H, fast), (L, fast), (H, slow), (L, slow)))
+    else:
+        fH, fL, sH, sL = bands       # wstęgi z wyższego interwału, wyrównane do świec df (wykonanie na niższym TF)
     trend = np.where(fL > sH, 1, np.where(fH < sL, -1, 0))
     n = len(c)
     res = []                 # (indeks wejścia, R, liczba wypełnień)
@@ -68,6 +75,11 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
     first = -1
     sl0 = None
     best = None
+    loc = df.index.tz_convert(day_tz)
+    dayk = (loc.year * 10000 + loc.month * 100 + loc.day).values
+    dow = df.index.dayofweek.values
+    hr = df.index.hour.values
+    cnt_day, cnt = None, 0
 
     def make(i, dd):
         # poziomy z wartości wstęg na zamkniętej świecy i-1
@@ -84,6 +96,14 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
 
     for i in range(slow * 3, n):
         tr = trend[i - 1]
+        if dayk[i] != cnt_day:
+            cnt_day, cnt = dayk[i], 0
+        if fri_close_h >= 0 and dow[i] == 4 and hr[i] >= fri_close_h:
+            if d != 0 and filled.any():
+                pnl = float(np.sum(units[filled] * d * (o[i] - ent[filled]))) - cost * float(np.sum(units[filled]))
+                res.append((first, pnl, int(filled.sum())))
+            d = 0
+            continue
         if blocked_dir != 0 and tr != blocked_dir:
             blocked_dir = 0              # wstęgi się zeszły albo cross w drugą stronę → nowy cross odblokuje
 
@@ -94,9 +114,10 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
                 res.append((first, pnl, int(filled.sum())))
             d = 0
 
-        if d == 0 and tr != 0 and tr != blocked_dir:
+        if d == 0 and tr != 0 and tr != blocked_dir and (max_per_day == 0 or cnt < max_per_day):
             m = make(i, tr)
             if m is not None:
+                cnt += 1
                 d = tr
                 levels, units, sl = m
                 filled = np.zeros(len(levels), bool)
