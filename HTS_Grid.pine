@@ -33,6 +33,13 @@ ptVal    = input.float(1.0, "Wartość 1 punktu przy 1 locie ($)", minval=0.0001
 lotStep  = input.float(0.01, "Krok lota", minval=0.0001, group=grpR)
 costPts  = input.float(1.5, "Koszt na zlecenie w teście (punkty: spread + prowizja)", minval=0, step=0.1, group=grpR)
 
+grpE = "=== Wyjście: stały cel albo trailing ==="
+exitMode  = input.string("Stały cel", "Wyjście", options=["Stały cel", "Trailing za szybką wstęgą", "Trailing X R za ceną"], group=grpE)
+trailFrom = input.string("Pełny koszyk", "Trailing zamiast celu od", options=["Pełny koszyk", "Każde wypełnienie"], group=grpE, tooltip="Pełny koszyk: niepełne koszyki dalej mają stały cel, a po wypełnieniu wszystkich zleceń cel jest zdejmowany i działa trailing.")
+trStart   = input.float(1.0, "Trailing startuje po zysku (R)", minval=0, step=0.1, group=grpE)
+trDist    = input.float(1.0, "Odległość trailingu (R, tryb X R za ceną)", minval=0.1, step=0.1, group=grpE)
+trBuf     = input.float(0.0, "Zapas za szybką wstęgą (R, tryb za wstęgą)", minval=0, step=0.1, group=grpE)
+
 grpV = "=== Wygląd ==="
 showLv  = input.bool(true, "Poziomy koszyka, SL i cel", group=grpV)
 showMk  = input.bool(true, "Znaczniki końca koszyka (cel / SL / cross)", group=grpV)
@@ -140,6 +147,11 @@ var int   d        = 0
 var int   blocked  = 0
 var int   lastFill = -1
 var float slB      = na
+var float sl0      = na       // SL z chwili pierwszego wypełnienia (1R)
+var float best     = na       // najlepsza cena od wypełnienia (trailing)
+
+f_trailOn() =>
+    exitMode != "Stały cel" and (trailFrom == "Każde wypełnienie" or f_nf() == nLv)
 
 bool evTp = false
 bool evSl = false
@@ -164,6 +176,8 @@ if bar_index > slowLen * 3
         if ok
             d := tr1
             slB := tr1 == 1 ? sLong : sShrt
+            sl0 := na
+            best := na
             for k = 0 to 9
                 array.set(flA, k, false)
                 array.set(enA, k, na)
@@ -187,19 +201,34 @@ if bar_index > slowLen * 3
                     array.set(flA, k, true)
                     lastFill := bar_index
         if f_nf() > 0
-            [rf, avg, su] = f_agg(d, slB)
-            float tp = tpR > 0 ? avg + d * tpR * rf / su : na
+            if na(sl0)
+                sl0 := slB
+            [rf, avg, su] = f_agg(d, sl0)
+            float unitR = rf / su
+            bool trailing = f_trailOn()
+            float tp = tpR > 0 ? avg + d * tpR * unitR : na
             float ex = na
             if d == 1 ? low <= slB : high >= slB
                 ex := d == 1 ? math.min(open, slB) : math.max(open, slB)
-                evSl := true
-                if needX
-                    blocked := d
-            else if tpR > 0 and bar_index > lastFill and (d == 1 ? high >= tp : low <= tp)
+            else if not trailing and tpR > 0 and bar_index > lastFill and (d == 1 ? high >= tp : low <= tp)
                 ex := d == 1 ? math.max(open, tp) : math.min(open, tp)
                 evTp := true
+            if na(ex) and trailing
+                float ext = d == 1 ? high : low
+                best := na(best) ? ext : d == 1 ? math.max(best, ext) : math.min(best, ext)
+                if d * (best - avg) / unitR >= trStart
+                    float cand = exitMode == "Trailing za szybką wstęgą" ? (d == 1 ? fL : fH) - d * trBuf * unitR : best - d * trDist * unitR
+                    slB := d == 1 ? math.max(slB, cand) : math.min(slB, cand)
             if not na(ex)
-                f_rec(f_pnl(d, ex), evTp ? 0 : 1)
+                float pnl = f_pnl(d, ex)
+                if not evTp
+                    if pnl < 0
+                        evSl := true
+                        if needX
+                            blocked := d
+                    else
+                        evTp := true
+                f_rec(pnl, evTp ? 0 : 1)
                 d := 0
 
 // ───────────────────────── Wykres ─────────────────────────
@@ -239,8 +268,8 @@ if barstate.islast
                  style=label.style_label_left, color=color.new(cl, 30), textcolor=color.white, size=size.small))
         array.push(lns, line.new(x1, slB, x2, slB, color=color.red, width=2))
         array.push(lbs, label.new(x2, slB, "SL " + str.tostring(slB, format.mintick), style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small))
-        if f_nf() > 0 and tpR > 0
-            [rf, avg, su] = f_agg(d, slB)
+        if f_nf() > 0 and tpR > 0 and not f_trailOn()
+            [rf, avg, su] = f_agg(d, na(sl0) ? slB : sl0)
             float tp = avg + d * tpR * rf / su
             array.push(lns, line.new(x1, tp, x2, tp, color=color.green, width=2))
             array.push(lbs, label.new(x2, tp, "Cel " + str.tostring(tp, format.mintick), style=label.style_label_left, color=color.new(color.green, 20), textcolor=color.white, size=size.small))
@@ -273,7 +302,7 @@ if showTbl and barstate.islast
     float sd = n > 1 ? math.sqrt(math.max(array.get(st, 2) / n - m * m, 0) * n / (n - 1)) : na
     float t = n > 1 and sd > 0 ? m / (sd / math.sqrt(n)) : na
 
-    f_row(0, "HTS Grid", str.tostring(fastLen) + "/" + str.tostring(slowLen) + " " + maType + ", " + str.tostring(nLv) + " zlec. (" + wTxt + "), cel " + str.tostring(tpR, "0.0") + "R", color.new(color.blue, 40))
+    f_row(0, "HTS Grid", str.tostring(fastLen) + "/" + str.tostring(slowLen) + " " + maType + ", " + str.tostring(nLv) + " zlec. (" + wTxt + "), " + (exitMode == "Stały cel" ? "cel " + str.tostring(tpR, "0.0") + "R" : exitMode + " od " + str.tostring(trStart, "0.0") + "R (" + trailFrom + ")"), color.new(color.blue, 40))
     f_row(1, "Trend", tr == 1 ? "LONG" : tr == -1 ? "SHORT" : "BRAK (wstęgi na sobie)", tr == 1 ? color.new(color.green, 30) : tr == -1 ? color.new(color.red, 30) : bg)
     string bTxt = d != 0 ? (d == 1 ? "LONG" : "SHORT") + ": wypełnione " + str.tostring(nf) + " / " + str.tostring(nLv) : blocked != 0 ? "po SL – czekam na nowy cross" : "brak"
     f_row(2, "Koszyk", bTxt, d != 0 ? color.new(color.orange, 30) : bg)

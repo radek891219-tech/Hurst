@@ -66,3 +66,12 @@ cel 2R / 3R od faktycznej straty, cross zamyka, po SL czekanie na nowy cross. DA
 - Grid ≈ pojedyncze wejście (różnice w granicach szumu); pełny koszyk wypełnia się w ~70 % koszyków i wygrywa w 13–24 %.
 - D1: 4–6 transakcji na okres – za mało, żeby cokolwiek stwierdzić.
 - Losowy rynek (`--synthetic`): wszystkie warianty ok. 0 R minus koszt – backtest nie zagląda w przyszłość.
+
+### Trailing zamiast stałego celu (m1, 89/298, 3 zlecenia 1 : 1.5 : 2, cel 1.7R)
+`simulate(..., trail="band"|"r", trail_from="full"|"any", tr_start=1.0, tr_dist=1.0)` – trailing za szybką wstęgą albo X R za najlepszą ceną,
+po pełnym koszyku albo po każdym wypełnieniu. DAX 2010–2018 i złoto (Oanda XAU/USD) 2006–2020:
+- DAX, koszt 1.5 pkt: stały cel −0.125 R, trailingi od −0.10 do −0.13 R; 0–2 z 9 lat na plus,
+- DAX bez kosztu: wszystko od −0.02 do +0.03 R (t ≤ 1.6),
+- złoto, koszt 0.30 $: stały cel −0.29 R, trailingi od −0.24 do −0.30 R; 0 z 15 lat na plus,
+- złoto bez kosztu: od −0.015 do +0.013 R.
+Trailing daje pojedyncze duże wygrane (do +24 R na DAX, +37 R na złocie), ale mniej wygranych – średnia zostaje ok. 0 przed kosztami.

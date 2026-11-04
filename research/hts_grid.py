@@ -47,7 +47,11 @@ def resample(df, tf):
     return o.dropna()
 
 
-def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross=True):
+def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross=True,
+             trail="off", trail_from="full", tr_start=1.0, tr_dist=1.0, tr_buf=0.0):
+    """trail: off – stały cel; band – SL za szybką wstęgą; r – SL w odległości tr_dist R za najlepszą ceną.
+    trail_from: full – trailing (zamiast celu) tylko po wypełnieniu całego koszyka, any – po każdym wypełnieniu.
+    Trailing startuje po zysku tr_start R (od faktycznej straty wypełnionych zleceń) i SL tylko się zacieśnia."""
     o, h, l, c = (df[k].values for k in ("open", "high", "low", "close"))
     H, L = df["high"], df["low"]
     fH, fL, sH, sL = (rma(x, n).values for x, n in ((H, fast), (L, fast), (H, slow), (L, slow)))
@@ -62,6 +66,8 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
     sl = 0.0
     last_fill = -1
     first = -1
+    sl0 = None
+    best = None
 
     def make(i, dd):
         # poziomy z wartości wstęg na zamkniętej świecy i-1
@@ -96,6 +102,8 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
                 filled = np.zeros(len(levels), bool)
                 ent = np.full(len(levels), np.nan)
                 last_fill = -1
+                sl0 = None
+                best = None
 
         if d == 0:
             continue
@@ -123,19 +131,33 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
         if not filled.any():
             continue
 
+        if sl0 is None:
+            sl0 = sl                     # SL zamrożony przy pierwszym wypełnieniu
         fu = units[filled]
         fe = ent[filled]
-        risk_f = float(np.sum(fu * d * (fe - sl)))
-        avg = float(np.sum(fu * fe) / np.sum(fu))
-        tp = avg + d * tp_r * risk_f / float(np.sum(fu))
+        su = float(np.sum(fu))
+        risk_f = float(np.sum(fu * d * (fe - sl0)))
+        avg = float(np.sum(fu * fe) / su)
+        unit_r = risk_f / su             # odległość średnia → SL w cenie (1R wypełnionych zleceń)
+        trailing = trail != "off" and (trail_from == "any" or filled.all())
+        tp = avg + d * tp_r * unit_r
         exit_px = None
         if (d == 1 and l[i] <= sl) or (d == -1 and h[i] >= sl):
             exit_px = min(o[i], sl) if d == 1 else max(o[i], sl)
-            blocked_dir = d if need_new_cross else 0
-        elif i > last_fill and ((d == 1 and h[i] >= tp) or (d == -1 and l[i] <= tp)):
+        elif not trailing and tp_r > 0 and i > last_fill and ((d == 1 and h[i] >= tp) or (d == -1 and l[i] <= tp)):
             exit_px = max(o[i], tp) if d == 1 else min(o[i], tp)
+        if exit_px is None and trailing:
+            best = (h[i] if d == 1 else l[i]) if best is None else (max(best, h[i]) if d == 1 else min(best, l[i]))
+            if d * (best - avg) / unit_r >= tr_start:
+                if trail == "band":
+                    cand = (fL[i] if d == 1 else fH[i]) - d * tr_buf * unit_r
+                else:
+                    cand = best - d * tr_dist * unit_r
+                sl = max(sl, cand) if d == 1 else min(sl, cand)
         if exit_px is not None:
-            pnl = float(np.sum(fu * d * (exit_px - fe))) - cost * float(np.sum(fu))
+            pnl = float(np.sum(fu * d * (exit_px - fe))) - cost * su
+            if pnl < 0 and need_new_cross:
+                blocked_dir = d
             res.append((first, pnl, int(filled.sum())))
             d = 0
     return res

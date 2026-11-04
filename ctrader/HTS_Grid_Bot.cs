@@ -22,6 +22,8 @@ using cAlgo.API.Internals;
 namespace cAlgo.Robots
 {
     public enum HgDirection { Both, LongOnly, ShortOnly }
+    public enum HgExit { FixedTarget, TrailBehindFastBand, TrailDistanceR }
+    public enum HgTrailFrom { FullBasket, AnyFill }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class HTS_Grid_Bot : Robot
@@ -71,6 +73,22 @@ namespace cAlgo.Robots
         [Parameter("Max SL (pips, 0 = off)", DefaultValue = 0.0, MinValue = 0, Group = "Risk")]
         public double MaxSlPips { get; set; }
 
+        // ───────── WYJŚCIE: STAŁY CEL ALBO TRAILING ─────────
+        [Parameter("Exit Mode", DefaultValue = HgExit.FixedTarget, Group = "Exit")]
+        public HgExit ExitMode { get; set; }
+
+        [Parameter("Trail From (full basket / any fill)", DefaultValue = HgTrailFrom.FullBasket, Group = "Exit")]
+        public HgTrailFrom TrailFrom { get; set; }
+
+        [Parameter("Trail Start After Profit (R)", DefaultValue = 1.0, MinValue = 0, Group = "Exit")]
+        public double TrailStartR { get; set; }
+
+        [Parameter("Trail Distance (R, distance mode)", DefaultValue = 1.0, MinValue = 0.1, Group = "Exit")]
+        public double TrailDistR { get; set; }
+
+        [Parameter("Trail Buffer Beyond Fast Band (R, band mode)", DefaultValue = 0.0, MinValue = 0, Group = "Exit")]
+        public double TrailBufR { get; set; }
+
         // ───────── OKNO ─────────
         [Parameter("Start Hour (UTC, = End Hour → always)", DefaultValue = 0, MinValue = 0, MaxValue = 23, Group = "Trading Window")]
         public int StartHour { get; set; }
@@ -100,6 +118,8 @@ namespace cAlgo.Robots
         private bool _frozen;        // po pierwszym wypełnieniu
         private int _blockedDir;     // po SL: kierunek zablokowany do nowego crossu
         private bool _closing;
+        private double _sl0;         // SL koszyka z chwili pierwszego wypełnienia (1R)
+        private double _best;        // najlepsza cena od startu trailingu
 
         private TimeZoneInfo _dayTz;
         private DateTime _day;
@@ -129,6 +149,8 @@ namespace cAlgo.Robots
             {
                 _dir = pos[0].TradeType == TradeType.Buy ? 1 : -1;
                 _frozen = true;
+                _sl0 = pos[0].StopLoss.HasValue ? pos[0].StopLoss.Value : 0;
+                _best = double.NaN;
             }
             else
             {
@@ -186,6 +208,13 @@ namespace cAlgo.Robots
                 {
                     _dir = 0;
                 }
+                return;
+            }
+
+            // koszyk z wypełnieniami: trailing (jeśli włączony)
+            if (_dir != 0 && _frozen)
+            {
+                Trail(i);
                 return;
             }
 
@@ -256,16 +285,86 @@ namespace cAlgo.Robots
         {
             var p = args.Position;
             if (p.SymbolName != SymbolName || p.Label != BotLabel) return;
+            if (!_frozen)
+            {
+                _sl0 = p.StopLoss.HasValue ? p.StopLoss.Value : 0;
+                _best = double.NaN;
+            }
             _frozen = true;
             UpdateTarget();
+        }
+
+        private bool TrailingActive()
+        {
+            if (ExitMode == HgExit.FixedTarget) return false;
+            if (TrailFrom == HgTrailFrom.AnyFill) return true;
+            return !PendingOrders.Any(x => x.SymbolName == SymbolName && x.Label == BotLabel);   // cały koszyk wypełniony
+        }
+
+        // średnia cena, suma wolumenu i 1R w cenie (odległość średnia → SL z pierwszego wypełnienia)
+        private bool BasketAvg(Position[] pos, int d, out double avg, out double unitR)
+        {
+            double u = 0, ue = 0;
+            foreach (var p in pos)
+            {
+                u += p.VolumeInUnits;
+                ue += p.VolumeInUnits * p.EntryPrice;
+            }
+            avg = u > 0 ? ue / u : 0;
+            unitR = d * (avg - _sl0);
+            return u > 0 && unitR > 0;
+        }
+
+        // trailing na zamkniętej świecy: SL za szybką wstęgą albo X R za najlepszą ceną, tylko w stronę zysku
+        private void Trail(int i)
+        {
+            if (!TrailingActive()) return;
+            var pos = MyPositions();
+            if (pos.Length == 0) return;
+            int d = pos[0].TradeType == TradeType.Buy ? 1 : -1;
+            double avg, unitR;
+            if (!BasketAvg(pos, d, out avg, out unitR)) return;
+
+            double ext = d == 1 ? Bars.HighPrices[i] : Bars.LowPrices[i];
+            _best = double.IsNaN(_best) ? ext : (d == 1 ? Math.Max(_best, ext) : Math.Min(_best, ext));
+            if (d * (_best - avg) / unitR < TrailStartR) return;
+
+            double cand = ExitMode == HgExit.TrailBehindFastBand
+                ? (d == 1 ? _fl.Result[i] : _fh.Result[i]) - d * TrailBufR * unitR
+                : _best - d * TrailDistR * unitR;
+            cand = Math.Round(cand / Symbol.TickSize) * Symbol.TickSize;
+            double px = d == 1 ? Symbol.Bid : Symbol.Ask;
+            if (d == 1 ? cand >= px : cand <= px)
+            {
+                CloseBasket("trailing – cena już za nowym SL");
+                return;
+            }
+            foreach (var p in pos)
+            {
+                if (p.StopLoss.HasValue && (d == 1 ? cand <= p.StopLoss.Value : cand >= p.StopLoss.Value)) continue;
+                var r = ModifyPosition(p, cand, p.TakeProfit, ProtectionType.Absolute);
+                if (!r.IsSuccessful && LogOn) Print("Trailing: nie udało się przesunąć SL: {0}", r.Error);
+            }
         }
 
         // cel = R-krotność faktycznej straty wypełnionych zleceń, od średniej ceny; ten sam TP na wszystkich pozycjach
         private void UpdateTarget()
         {
-            if (TpR <= 0) return;
             var pos = MyPositions();
             if (pos.Length == 0) return;
+            if (TrailingActive())
+            {
+                // trailing zamiast stałego celu: zdejmij TP ze wszystkich pozycji
+                foreach (var p in pos)
+                    if (p.TakeProfit.HasValue)
+                    {
+                        var r0 = ModifyPosition(p, p.StopLoss, null, ProtectionType.Absolute);
+                        if (!r0.IsSuccessful && LogOn) Print("Nie udało się zdjąć celu: {0}", r0.Error);
+                    }
+                if (LogOn) Print("Wypełnione {0} zlecenia – wyjście trailingiem ({1})", pos.Length, ExitMode);
+                return;
+            }
+            if (TpR <= 0) return;
             int d = pos[0].TradeType == TradeType.Buy ? 1 : -1;
             double u = 0, ue = 0, risk = 0;
             foreach (var p in pos)
@@ -309,6 +408,11 @@ namespace cAlgo.Robots
             {
                 nTp++;
                 if (LogOn) Print("Koszyk na celu");
+            }
+            else if (p.NetProfit >= 0)
+            {
+                nTp++;
+                if (LogOn) Print("Koszyk zamknięty trailingiem na plusie");
             }
             else
             {
