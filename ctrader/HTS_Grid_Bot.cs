@@ -89,6 +89,15 @@ namespace cAlgo.Robots
         [Parameter("Trail Buffer Beyond Fast Band (R, band mode)", DefaultValue = 0.0, MinValue = 0, Group = "Exit")]
         public double TrailBufR { get; set; }
 
+        [Parameter("Partial Close at Target (%, 0 = off)", DefaultValue = 0.0, MinValue = 0, MaxValue = 99, Group = "Exit")]
+        public double PartialPct { get; set; }
+
+        [Parameter("Partial: Rest SL at Least at Entry", DefaultValue = true, Group = "Exit")]
+        public bool PartialBe { get; set; }
+
+        [Parameter("Partial: Rest Buffer Beyond Fast Band (R)", DefaultValue = 0.0, MinValue = 0, Group = "Exit")]
+        public double PartialBufR { get; set; }
+
         // ───────── OKNO ─────────
         [Parameter("Start Hour (UTC, = End Hour → always)", DefaultValue = 0, MinValue = 0, MaxValue = 23, Group = "Trading Window")]
         public int StartHour { get; set; }
@@ -120,6 +129,10 @@ namespace cAlgo.Robots
         private bool _closing;
         private double _sl0;         // SL koszyka z chwili pierwszego wypełnienia (1R)
         private double _best;        // najlepsza cena od startu trailingu
+        private double _tp1Price;    // cel, na którym zamykana jest część koszyka (tryb Partial)
+        private bool _tp1Done;       // część zamknięta, reszta idzie za szybką wstęgą
+
+        private bool PartialMode { get { return PartialPct > 0 && ExitMode == HgExit.FixedTarget; } }
 
         private TimeZoneInfo _dayTz;
         private DateTime _day;
@@ -172,7 +185,69 @@ namespace cAlgo.Robots
 
             if (FridayCloseHour >= 0 && Server.Time.DayOfWeek == DayOfWeek.Friday && Server.Time.Hour >= FridayCloseHour
                 && (_dir != 0 || MyPositions().Length > 0))
+            {
                 CloseBasket("piątek");
+                return;
+            }
+
+            // tryb Partial: na celu zamknij część koszyka, resztę prowadź za szybką wstęgą
+            if (PartialMode && _frozen && !_tp1Done && _tp1Price > 0)
+            {
+                var pos = MyPositions();
+                if (pos.Length > 0)
+                {
+                    int d = pos[0].TradeType == TradeType.Buy ? 1 : -1;
+                    double px = d == 1 ? Symbol.Bid : Symbol.Ask;
+                    if (d == 1 ? px >= _tp1Price : px <= _tp1Price) DoPartial(pos, d);
+                }
+            }
+        }
+
+        private void DoPartial(Position[] pos, int d)
+        {
+            _tp1Done = true;
+            CancelPendings();                                  // po celu nie dokładamy
+            double u = 0, ue = 0;
+            foreach (var p in pos) { u += p.VolumeInUnits; ue += p.VolumeInUnits * p.EntryPrice; }
+            double avg = u > 0 ? ue / u : 0;
+            _closing = true;
+            foreach (var p in pos)
+            {
+                double part = Symbol.NormalizeVolumeInUnits(p.VolumeInUnits * PartialPct / 100, RoundingMode.Down);
+                if (part >= Symbol.VolumeInUnitsMin && p.VolumeInUnits - part >= Symbol.VolumeInUnitsMin)
+                    ClosePosition(p, part);
+                else
+                    ClosePosition(p);                          // za mała pozycja na podział – zamknij całą
+            }
+            _closing = false;
+            var rest = MyPositions();
+            if (rest.Length == 0)
+            {
+                nTp++;
+                _dir = 0;
+                _frozen = false;
+                if (LogOn) Print("Cel osiągnięty – pozycje za małe na podział, koszyk zamknięty w całości");
+                return;
+            }
+            if (PartialBe) MoveBasketSl(rest, d, Math.Round(avg / Symbol.TickSize) * Symbol.TickSize);
+            if (LogOn) Print("Cel osiągnięty: zamknięte {0}% koszyka, reszta ({1} poz.) idzie za szybką wstęgą", PartialPct, rest.Length);
+        }
+
+        // przesuń SL wszystkich pozycji koszyka, tylko w stronę zysku; gdy poziom jest już za ceną – zamknij
+        private void MoveBasketSl(Position[] pos, int d, double level)
+        {
+            double px = d == 1 ? Symbol.Bid : Symbol.Ask;
+            if (d == 1 ? level >= px : level <= px)
+            {
+                CloseBasket("nowy SL już za ceną");
+                return;
+            }
+            foreach (var p in pos)
+            {
+                if (p.StopLoss.HasValue && (d == 1 ? level <= p.StopLoss.Value : level >= p.StopLoss.Value)) continue;
+                var r = ModifyPosition(p, level, p.TakeProfit, ProtectionType.Absolute);
+                if (!r.IsSuccessful && LogOn) Print("Nie udało się przesunąć SL: {0}", r.Error);
+            }
         }
 
         protected override void OnBar()
@@ -289,6 +364,8 @@ namespace cAlgo.Robots
             {
                 _sl0 = p.StopLoss.HasValue ? p.StopLoss.Value : 0;
                 _best = double.NaN;
+                _tp1Price = 0;
+                _tp1Done = false;
             }
             _frozen = true;
             UpdateTarget();
@@ -318,6 +395,19 @@ namespace cAlgo.Robots
         // trailing na zamkniętej świecy: SL za szybką wstęgą albo X R za najlepszą ceną, tylko w stronę zysku
         private void Trail(int i)
         {
+            if (PartialMode && _tp1Done)
+            {
+                // reszta po częściowym zamknięciu: SL za szybką wstęgą
+                var rp = MyPositions();
+                if (rp.Length == 0) return;
+                int dd = rp[0].TradeType == TradeType.Buy ? 1 : -1;
+                double av, ur;
+                if (!BasketAvg(rp, dd, out av, out ur)) return;
+                double lvl = (dd == 1 ? _fl.Result[i] : _fh.Result[i]) - dd * PartialBufR * ur;
+                lvl = Math.Round(lvl / Symbol.TickSize) * Symbol.TickSize;
+                MoveBasketSl(rp, dd, lvl);
+                return;
+            }
             if (!TrailingActive()) return;
             var pos = MyPositions();
             if (pos.Length == 0) return;
@@ -379,6 +469,15 @@ namespace cAlgo.Robots
             double tp = avg + d * TpR * risk / u;
             tp = Math.Round(tp / Symbol.TickSize) * Symbol.TickSize;
             double px = d == 1 ? Symbol.Bid : Symbol.Ask;
+            if (PartialMode)
+            {
+                // cel pilnuje bot (OnTick), bo TP na pozycji zamknąłby ją w całości
+                _tp1Price = tp;
+                if (LogOn) Print("Wypełnione {0} zlecenia, średnia {1}, cel {2} – zamknięcie {3}% i reszta za szybką wstęgą",
+                    pos.Length, Math.Round(avg / Symbol.TickSize) * Symbol.TickSize, tp, PartialPct);
+                if (d == 1 ? px >= tp : px <= tp) DoPartial(pos, d);
+                return;
+            }
             if (d == 1 ? px >= tp : px <= tp)
             {
                 CloseBasket("cel osiągnięty");

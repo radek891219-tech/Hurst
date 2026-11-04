@@ -49,13 +49,16 @@ def resample(df, tf):
 
 def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross=True,
              trail="off", trail_from="full", tr_start=1.0, tr_dist=1.0, tr_buf=0.0,
-             max_per_day=0, fri_close_h=-1, day_tz="Europe/Prague", bands=None):
+             max_per_day=0, fri_close_h=-1, day_tz="Europe/Prague", bands=None,
+             partial=0.0, part_be=True, part_buf=0.0):
     """trail: off – stały cel; band – SL za szybką wstęgą; r – SL w odległości tr_dist R za najlepszą ceną.
     trail_from: full – trailing (zamiast celu) tylko po wypełnieniu całego koszyka, any – po każdym wypełnieniu.
     Trailing startuje po zysku tr_start R (od faktycznej straty wypełnionych zleceń) i SL tylko się zacieśnia.
     max_per_day: limit nowych koszyków na dzień (dzień w strefie day_tz, jak w cBocie), 0 = bez limitu.
     fri_close_h: w piątek od tej godziny UTC wszystko zamknięte i brak nowych koszyków (jak w cBocie), -1 = wył.
-    bands: (fH, fL, sH, sL) z interwału strategii, wyrównane do df – zlecenia i SL/TP sprawdzane na drobniejszych świecach."""
+    bands: (fH, fL, sH, sL) z interwału strategii, wyrównane do df – zlecenia i SL/TP sprawdzane na drobniejszych świecach.
+    partial: część koszyka zamykana na celu (np. 0.5); reszta idzie za szybką wstęgą (SL tylko się zacieśnia),
+             niewypełnione zlecenia są kasowane; part_be – SL reszty co najmniej na średniej cenie wejścia."""
     o, h, l, c = (df[k].values for k in ("open", "high", "low", "close"))
     H, L = df["high"], df["low"]
     if bands is None:
@@ -75,6 +78,9 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
     first = -1
     sl0 = None
     best = None
+    tp1 = False
+    rem = 1.0
+    real = 0.0
     loc = df.index.tz_convert(day_tz)
     dayk = (loc.year * 10000 + loc.month * 100 + loc.day).values
     dow = df.index.dayofweek.values
@@ -100,7 +106,7 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
             cnt_day, cnt = dayk[i], 0
         if fri_close_h >= 0 and dow[i] == 4 and hr[i] >= fri_close_h:
             if d != 0 and filled.any():
-                pnl = float(np.sum(units[filled] * d * (o[i] - ent[filled]))) - cost * float(np.sum(units[filled]))
+                pnl = real + rem * float(np.sum(units[filled] * d * (o[i] - ent[filled]))) - cost * float(np.sum(units[filled]))
                 res.append((first, pnl, int(filled.sum())))
             d = 0
             continue
@@ -110,7 +116,7 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
         if d != 0 and tr != d:
             # unieważnienie: cross w drugą stronę / koniec trendu
             if filled.any():
-                pnl = float(np.sum(units[filled] * d * (o[i] - ent[filled]))) - cost * float(np.sum(units[filled]))
+                pnl = real + rem * float(np.sum(units[filled] * d * (o[i] - ent[filled]))) - cost * float(np.sum(units[filled]))
                 res.append((first, pnl, int(filled.sum())))
             d = 0
 
@@ -125,6 +131,9 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
                 last_fill = -1
                 sl0 = None
                 best = None
+                tp1 = False
+                rem = 1.0
+                real = 0.0
 
         if d == 0:
             continue
@@ -138,7 +147,7 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
 
         # wypełnienia (tylko poziomy po właściwej stronie ceny zamknięcia poprzedniej świecy)
         for k in range(len(levels)):
-            if filled[k]:
+            if filled[k] or tp1:
                 continue
             lv = levels[k]
             if (d == 1 and c[i - 1] <= lv) or (d == -1 and c[i - 1] >= lv):
@@ -165,8 +174,20 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
         exit_px = None
         if (d == 1 and l[i] <= sl) or (d == -1 and h[i] >= sl):
             exit_px = min(o[i], sl) if d == 1 else max(o[i], sl)
-        elif not trailing and tp_r > 0 and i > last_fill and ((d == 1 and h[i] >= tp) or (d == -1 and l[i] <= tp)):
-            exit_px = max(o[i], tp) if d == 1 else min(o[i], tp)
+        elif not trailing and not tp1 and tp_r > 0 and i > last_fill and ((d == 1 and h[i] >= tp) or (d == -1 and l[i] <= tp)):
+            px = max(o[i], tp) if d == 1 else min(o[i], tp)
+            if partial > 0:
+                # częściowe zamknięcie na celu, reszta za szybką wstęgą
+                real += partial * float(np.sum(fu * d * (px - fe)))
+                rem = 1.0 - partial
+                tp1 = True
+                if part_be:
+                    sl = max(sl, avg) if d == 1 else min(sl, avg)
+            else:
+                exit_px = px
+        if exit_px is None and tp1:
+            cand = (fL[i] if d == 1 else fH[i]) - d * part_buf * unit_r
+            sl = max(sl, cand) if d == 1 else min(sl, cand)
         if exit_px is None and trailing:
             best = (h[i] if d == 1 else l[i]) if best is None else (max(best, h[i]) if d == 1 else min(best, l[i]))
             if d * (best - avg) / unit_r >= tr_start:
@@ -176,7 +197,7 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
                     cand = best - d * tr_dist * unit_r
                 sl = max(sl, cand) if d == 1 else min(sl, cand)
         if exit_px is not None:
-            pnl = float(np.sum(fu * d * (exit_px - fe))) - cost * su
+            pnl = real + rem * float(np.sum(fu * d * (exit_px - fe))) - cost * su
             if pnl < 0 and need_new_cross:
                 blocked_dir = d
             res.append((first, pnl, int(filled.sum())))

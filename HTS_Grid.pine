@@ -39,6 +39,9 @@ trailFrom = input.string("Pełny koszyk", "Trailing zamiast celu od", options=["
 trStart   = input.float(1.0, "Trailing startuje po zysku (R)", minval=0, step=0.1, group=grpE)
 trDist    = input.float(1.0, "Odległość trailingu (R, tryb X R za ceną)", minval=0.1, step=0.1, group=grpE)
 trBuf     = input.float(0.0, "Zapas za szybką wstęgą (R, tryb za wstęgą)", minval=0, step=0.1, group=grpE)
+partPct   = input.float(0, "Stały cel: zamknij część na celu (%, 0 = całość)", minval=0, maxval=99, step=5, group=grpE, tooltip="Np. 50: na celu zamyka się połowa koszyka, niewypełnione zlecenia są kasowane, a reszta idzie za szybką wstęgą.")
+partBe    = input.bool(true, "Reszta: SL co najmniej na cenie wejścia", group=grpE)
+partBuf   = input.float(0.0, "Reszta: zapas za szybką wstęgą (R)", minval=0, step=0.1, group=grpE)
 
 grpV = "=== Wygląd ==="
 showLv  = input.bool(true, "Poziomy koszyka, SL i cel", group=grpV)
@@ -107,13 +110,16 @@ f_nf() =>
         n += array.get(flA, k) ? 1 : 0
     n
 
-f_pnl(int dd, float px) =>
-    float p = 0.0
+// wynik koszyka w R: część zrealizowana na celu (re) + reszta (rm) po cenie px, minus koszt
+f_pnl(int dd, float px, float re, float rm) =>
+    float g = 0.0
+    float c = 0.0
     for k = 0 to nLv - 1
         if array.get(flA, k)
             float u = array.get(unA, k)
-            p += u * dd * (px - array.get(enA, k)) - costPts * u
-    p
+            g += u * dd * (px - array.get(enA, k))
+            c += costPts * u
+    re + rm * g - c
 
 f_agg(int dd, float s) =>
     float su = 0.0
@@ -149,6 +155,9 @@ var int   lastFill = -1
 var float slB      = na
 var float sl0      = na       // SL z chwili pierwszego wypełnienia (1R)
 var float best     = na       // najlepsza cena od wypełnienia (trailing)
+var bool  tp1      = false    // część zamknięta na celu, reszta za szybką wstęgą
+var float rem      = 1.0
+var float real     = 0.0
 
 f_trailOn() =>
     exitMode != "Stały cel" and (trailFrom == "Każde wypełnienie" or f_nf() == nLv)
@@ -163,7 +172,7 @@ if bar_index > slowLen * 3
     // unieważnienie: cross w drugą stronę / koniec trendu
     if d != 0 and tr1 != d
         if f_nf() > 0
-            f_rec(f_pnl(d, open), 2)
+            f_rec(f_pnl(d, open, real, rem), 2)
             evX := true
         d := 0
     // nowy koszyk albo przesunięcie niewypełnionego za wstęgami
@@ -178,6 +187,9 @@ if bar_index > slowLen * 3
             slB := tr1 == 1 ? sLong : sShrt
             sl0 := na
             best := na
+            tp1 := false
+            rem := 1.0
+            real := 0.0
             for k = 0 to 9
                 array.set(flA, k, false)
                 array.set(enA, k, na)
@@ -193,7 +205,7 @@ if bar_index > slowLen * 3
     if d != 0
         // wypełnienia limitów
         for k = 0 to nLv - 1
-            if not array.get(flA, k)
+            if not array.get(flA, k) and not tp1
                 float lv = array.get(lvA, k)
                 bool side = d == 1 ? c1 > lv : c1 < lv
                 if side and (d == 1 ? low <= lv : high >= lv)
@@ -210,9 +222,21 @@ if bar_index > slowLen * 3
             float ex = na
             if d == 1 ? low <= slB : high >= slB
                 ex := d == 1 ? math.min(open, slB) : math.max(open, slB)
-            else if not trailing and tpR > 0 and bar_index > lastFill and (d == 1 ? high >= tp : low <= tp)
-                ex := d == 1 ? math.max(open, tp) : math.min(open, tp)
-                evTp := true
+            else if not trailing and not tp1 and tpR > 0 and bar_index > lastFill and (d == 1 ? high >= tp : low <= tp)
+                float px = d == 1 ? math.max(open, tp) : math.min(open, tp)
+                if partPct > 0
+                    // część na celu, reszta za szybką wstęgą
+                    real := (partPct / 100) * (f_pnl(d, px, 0.0, 1.0) + costPts * su)
+                    rem := 1 - partPct / 100
+                    tp1 := true
+                    if partBe
+                        slB := d == 1 ? math.max(slB, avg) : math.min(slB, avg)
+                else
+                    ex := px
+                    evTp := true
+            if na(ex) and tp1
+                float pc = (d == 1 ? fL : fH) - d * partBuf * unitR
+                slB := d == 1 ? math.max(slB, pc) : math.min(slB, pc)
             if na(ex) and trailing
                 float ext = d == 1 ? high : low
                 best := na(best) ? ext : d == 1 ? math.max(best, ext) : math.min(best, ext)
@@ -220,7 +244,7 @@ if bar_index > slowLen * 3
                     float cand = exitMode == "Trailing za szybką wstęgą" ? (d == 1 ? fL : fH) - d * trBuf * unitR : best - d * trDist * unitR
                     slB := d == 1 ? math.max(slB, cand) : math.min(slB, cand)
             if not na(ex)
-                float pnl = f_pnl(d, ex)
+                float pnl = f_pnl(d, ex, real, rem)
                 if not evTp
                     if pnl < 0
                         evSl := true
@@ -268,7 +292,7 @@ if barstate.islast
                  style=label.style_label_left, color=color.new(cl, 30), textcolor=color.white, size=size.small))
         array.push(lns, line.new(x1, slB, x2, slB, color=color.red, width=2))
         array.push(lbs, label.new(x2, slB, "SL " + str.tostring(slB, format.mintick), style=label.style_label_left, color=color.new(color.red, 20), textcolor=color.white, size=size.small))
-        if f_nf() > 0 and tpR > 0 and not f_trailOn()
+        if f_nf() > 0 and tpR > 0 and not f_trailOn() and not tp1
             [rf, avg, su] = f_agg(d, na(sl0) ? slB : sl0)
             float tp = avg + d * tpR * rf / su
             array.push(lns, line.new(x1, tp, x2, tp, color=color.green, width=2))

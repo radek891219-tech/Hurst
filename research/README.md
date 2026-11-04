@@ -75,3 +75,9 @@ po pełnym koszyku albo po każdym wypełnieniu. DAX 2010–2018 i złoto (Oanda
 - złoto, koszt 0.30 $: stały cel −0.29 R, trailingi od −0.24 do −0.30 R; 0 z 15 lat na plus,
 - złoto bez kosztu: od −0.015 do +0.013 R.
 Trailing daje pojedyncze duże wygrane (do +24 R na DAX, +37 R na złocie), ale mniej wygranych – średnia zostaje ok. 0 przed kosztami.
+
+### Częściowe zamknięcie na celu + reszta za szybką wstęgą (BTC m5, 89/298, 3 zlecenia 1 : 2 : 3, cel 0.4R)
+`simulate(..., partial=0.5, part_be=True)`; BTC/USD Bitstamp, wykonanie na świecach 1m, wstęgi z m5, 4 koszyki/dzień, piątek 19 UTC.
+- cały koszyk na celu, koszt 10 $: 29.11.2025 → 4.11.2026 −0.043 R, 2022 → 28.11.2025 −0.079 R,
+- 50 % na celu + reszta za szybką wstęgą + SL na wejściu: −0.048 R i −0.051 R (bez kosztu −0.027 R i −0.013 R),
+- pojedyncze koszyki do +23 R, ale średnia dalej poniżej zera; losowy rynek: +0.005 R.
