@@ -31,3 +31,13 @@ python research/hts_trendstart.py --synthetic                                 # 
 Wynik dzielony na pierwszą połowę (trening) i drugą (test). Na losowym rynku wszystkie warianty dają ok. 0 R
 (lekko poniżej, bo SL liczony jest przed TP), a po kosztach są na minusie – zarządzanie zmienia obsunięcie
 i skuteczność, ale nie tworzy przewagi.
+
+## Europa vs USA (`eu_vs_us.py`)
+Czy sesja amerykańska odwraca albo kontynuuje ruch Europy na DAX / GER40 – na długich danych 1m, z wynikiem dla każdego roku.
+```
+python research/eu_vs_us.py --data dax_1m.csv --src-tz UTC
+python research/eu_vs_us.py --data dax_1m.csv --src-tz UTC --us-end 11:30   # tylko pierwsze 2 h USA
+python research/eu_vs_us.py --synthetic                                    # kontrola: losowy rynek
+```
+Na losowym rynku korelacja wychodzi ok. 0, a pojedyncze |t| ≈ 2 w jednej grupie trafia się przypadkiem –
+dlatego zależność liczy się dopiero, gdy ma ten sam znak w obu połowach danych i w większości lat.
