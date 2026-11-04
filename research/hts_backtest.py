@@ -55,7 +55,7 @@ def load_csv(path, src_tz="UTC"):
             tkey = next((k for k in ("gmt time", "local time", "datetime", "date time", "timestamp", "time", "date") if k in cols), None)
             tcol = cols[tkey] if tkey else df.columns[0]
             s = df[tcol]
-            if np.issubdtype(s.dtype, np.number):
+            if pd.api.types.is_numeric_dtype(s):
                 dt = pd.to_datetime(s, unit="s" if s.iloc[0] < 1e11 else "ms", utc=True)
             else:
                 s = s.astype(str).str.replace(r"\s*(GMT|UTC)[+-]?\d*$", "", regex=True)
