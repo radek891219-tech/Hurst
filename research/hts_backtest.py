@@ -87,22 +87,34 @@ def rma(s, n):
     return s.ewm(alpha=1.0 / n, adjust=False).mean()
 
 
+def band_ma(s, n, typ="Wilder"):
+    """Średnia pasm HTS: Wilder (jak w cBocie), EMA albo SMA."""
+    if typ == "EMA":
+        return s.ewm(span=n, adjust=False).mean()
+    if typ == "SMA":
+        return s.rolling(n).mean()
+    return rma(s, n)
+
+
 def prepare(df, p):
     """Wszystko, co nie zależy od parametrów kampanii – liczone raz."""
     o, h, l, c = df["open"], df["high"], df["low"], df["close"]
-    eFH, eFL, eSH, eSL = rma(h, p["e_fast"]), rma(l, p["e_fast"]), rma(h, p["e_slow"]), rma(l, p["e_slow"])
+    mt = p.get("ma", "Wilder")
+    eFH, eFL, eSH, eSL = band_ma(h, p["e_fast"], mt), band_ma(l, p["e_fast"], mt), band_ma(h, p["e_slow"], mt), band_ma(l, p["e_slow"], mt)
     fMid, sMid = (eFH + eFL) / 2, (eSH + eSL) / 2
 
     h1 = df.resample("60min", label="left", closed="left").agg({"high": "max", "low": "min"}).dropna()
-    hFH, hFL, hSH, hSL = rma(h1["high"], p["t_fast"]), rma(h1["low"], p["t_fast"]), rma(h1["high"], p["t_slow"]), rma(h1["low"], p["t_slow"])
+    hFH, hFL, hSH, hSL = (band_ma(h1["high"], p["t_fast"], mt), band_ma(h1["low"], p["t_fast"], mt),
+                          band_ma(h1["high"], p["t_slow"], mt), band_ma(h1["low"], p["t_slow"], mt))
     key = df.index.floor("60min")
     prev = lambda s: s.shift(1).reindex(key).values  # wartość z ostatniej ZAMKNIĘTEJ świecy H1
     tFHc, tFLc, tSHc, tSLc = prev(hFH), prev(hFL), prev(hSH), prev(hSL)
     tHc, tLc = prev(h1["high"]), prev(h1["low"])
     runHi = h.groupby(key).cummax().values
     runLo = l.groupby(key).cummin().values
-    tFH0 = tFHc + (runHi - tFHc) / p["t_fast"]   # rozwijająca się wartość (jak Last(0) w bocie)
-    tFL0 = tFLc + (runLo - tFLc) / p["t_fast"]
+    k0 = 2.0 / (p["t_fast"] + 1) if mt == "EMA" else 1.0 / p["t_fast"]
+    tFH0 = tFHc + (runHi - tFHc) * k0   # rozwijająca się wartość (jak Last(0) w bocie)
+    tFL0 = tFLc + (runLo - tFLc) * k0
     trend = np.where(tFLc > tSHc, 1, np.where(tFHc < tSLc, -1, 0))
     trend[np.isnan(tSLc)] = 0
 
