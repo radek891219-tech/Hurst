@@ -50,7 +50,7 @@ def resample(df, tf):
 def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross=True,
              trail="off", trail_from="full", tr_start=1.0, tr_dist=1.0, tr_buf=0.0,
              max_per_day=0, fri_close_h=-1, day_tz="Europe/Prague", bands=None,
-             partial=0.0, part_be=True, part_buf=0.0):
+             partial=0.0, part_be=True, part_buf=0.0, direction=0, sl_mult=1.0, win=None):
     """trail: off – stały cel; band – SL za szybką wstęgą; r – SL w odległości tr_dist R za najlepszą ceną.
     trail_from: full – trailing (zamiast celu) tylko po wypełnieniu całego koszyka, any – po każdym wypełnieniu.
     Trailing startuje po zysku tr_start R (od faktycznej straty wypełnionych zleceń) i SL tylko się zacieśnia.
@@ -58,7 +58,9 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
     fri_close_h: w piątek od tej godziny UTC wszystko zamknięte i brak nowych koszyków (jak w cBocie), -1 = wył.
     bands: (fH, fL, sH, sL) z interwału strategii, wyrównane do df – zlecenia i SL/TP sprawdzane na drobniejszych świecach.
     partial: część koszyka zamykana na celu (np. 0.5); reszta idzie za szybką wstęgą (SL tylko się zacieśnia),
-             niewypełnione zlecenia są kasowane; part_be – SL reszty co najmniej na średniej cenie wejścia."""
+             niewypełnione zlecenia są kasowane; part_be – SL reszty co najmniej na średniej cenie wejścia.
+    direction: 0 oba, 1 tylko long, -1 tylko short; sl_mult: SL = sl_mult × szerokość wolnej za wolną wstęgą;
+    win: (start, koniec) godzin UTC, w których wolno zacząć nowy koszyk (jak Start/End Hour w cBocie)."""
     o, h, l, c = (df[k].values for k in ("open", "high", "low", "close"))
     H, L = df["high"], df["low"]
     if bands is None:
@@ -92,7 +94,7 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
         a = fH[i - 1] if dd == 1 else fL[i - 1]
         b = sH[i - 1] if dd == 1 else sL[i - 1]
         w = sH[i - 1] - sL[i - 1]
-        s = sL[i - 1] - w if dd == 1 else sH[i - 1] + w
+        s = sL[i - 1] - sl_mult * w if dd == 1 else sH[i - 1] + sl_mult * w
         lv = np.array([a + (b - a) * p for p in pos])
         dist = dd * (lv - s)
         if np.any(dist <= 0):
@@ -120,7 +122,8 @@ def simulate(df, pos, wts, fast=33, slow=144, tp_r=3.0, cost=1.5, need_new_cross
                 res.append((first, pnl, int(filled.sum())))
             d = 0
 
-        if d == 0 and tr != 0 and tr != blocked_dir and (max_per_day == 0 or cnt < max_per_day):
+        in_win = win is None or win[0] == win[1] or (win[0] <= hr[i] < win[1] if win[0] < win[1] else (hr[i] >= win[0] or hr[i] < win[1]))
+        if d == 0 and tr != 0 and tr != blocked_dir and (max_per_day == 0 or cnt < max_per_day) and in_win and direction in (0, tr):
             m = make(i, tr)
             if m is not None:
                 cnt += 1
