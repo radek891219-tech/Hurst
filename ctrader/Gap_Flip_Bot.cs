@@ -2,21 +2,25 @@
 //  Zasady:
 //   • poziom luki L = zamknięcie poprzedniej sesji (ostatnia świeca przed Session Close),
 //     luka = otwarcie pierwszej świecy sesji − L (filtr: min/max wielkości luki w ATR),
+//   • sesja może przechodzić przez północ (Session Open > Session Close), np. CFD GER40: luka na nocnej przerwie,
 //   • luka w górę: świeca zamyka się POD L − bufor → SHORT; potem zamyka się NAD L + bufor → odwrócenie na LONG;
 //     znowu pod → SHORT … i tak dalej, aż cena pójdzie w jedną stronę,
 //   • luka w dół: lustrzanie (pierwsze wejście LONG po zamknięciu nad L + bufor),
 //   • stop = odwrócenie; dodatkowo zawsze awaryjny SL na serwerze (za poziomem, na wypadek szpilki),
-//   • wyjście: TP (k × ATR od wejścia) – po TP koniec gry na ten dzień – albo zamknięcie na koniec sesji,
-//   • limit wejść na dzień: po ostatnim wejściu sygnał przeciwny tylko zamyka pozycję,
-//   • ATR = średni zakres sesji (high − low) z ostatnich N sesji, bez dnia bieżącego,
+//   • wyjście: TP (k × ATR od wejścia) – po TP koniec gry w tej sesji – albo zamknięcie na koniec sesji,
+//   • limit wejść na sesję: po ostatnim wejściu sygnał przeciwny tylko zamyka pozycję,
+//   • ATR = ATR z wykresu dziennego (ostatnia zamknięta świeca D1) – działa od pierwszego dnia backtestu,
 //   • sygnały na ZAMKNIĘTEJ świecy, zlecenie po rynku od razu (≈ otwarcie następnej świecy),
 //   • bezpiecznik: dzienny limit straty liczony jak FTMO (equity vs saldo z północy CET).
-//  Wykres: zalecany m1 lub m5. Czas sesji w strefie z parametru (domyślnie Berlin – DAX/GER40: 09:00–17:30).
+//  Przy starcie bot wypisuje w Dziennikach ostatnie przerwy w notowaniach (godziny w strefie sesji) –
+//  według nich ustaw Session Open (pierwsza świeca po przerwie) i Session Close (koniec ostatniej świecy przed przerwą).
+//  Wykres: zalecany m1 lub m5.
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using cAlgo.API;
+using cAlgo.API.Indicators;
 using cAlgo.API.Internals;
 
 namespace cAlgo.Robots
@@ -37,17 +41,17 @@ namespace cAlgo.Robots
         public bool DrawOn { get; set; }
 
         // ── Sesja
-        [Parameter("Session Open (HH:mm)", DefaultValue = "09:00", Group = "Session")]
+        [Parameter("Session Open (HH:mm, first bar after break)", DefaultValue = "23:00", Group = "Session")]
         public string SessOpenStr { get; set; }
 
-        [Parameter("Session Close (HH:mm)", DefaultValue = "17:30", Group = "Session")]
+        [Parameter("Session Close (HH:mm, end of last bar before break)", DefaultValue = "22:00", Group = "Session")]
         public string SessCloseStr { get; set; }
 
         [Parameter("Session Time Zone (Windows ID)", DefaultValue = "Central European Standard Time", Group = "Session")]
         public string SessTzId { get; set; }
 
         // ── Luka
-        [Parameter("ATR Sessions (avg session range)", DefaultValue = 20, MinValue = 2, Group = "Gap")]
+        [Parameter("ATR Period (daily bars)", DefaultValue = 20, MinValue = 2, Group = "Gap")]
         public int AtrDays { get; set; }
 
         [Parameter("Min Gap (x ATR)", DefaultValue = 0.1, MinValue = 0, Group = "Gap")]
@@ -62,7 +66,7 @@ namespace cAlgo.Robots
         [Parameter("First Entry With Gap at Open", DefaultValue = false, Group = "Gap")]
         public bool WithGap { get; set; }
 
-        [Parameter("Max Entries per Day", DefaultValue = 3, MinValue = 1, MaxValue = 50, Group = "Gap")]
+        [Parameter("Max Entries per Session", DefaultValue = 3, MinValue = 1, MaxValue = 50, Group = "Gap")]
         public int MaxEntries { get; set; }
 
         // ── Wyjście / ryzyko
@@ -90,11 +94,14 @@ namespace cAlgo.Robots
 
         private TimeZoneInfo _sessTz, _dayTz;
         private TimeSpan _open, _close;
+        private bool _wrap;                 // sesja przechodzi przez północ
+        private TimeSpan _step = TimeSpan.FromMinutes(1);   // długość świecy
+        private Bars _d1;
+        private AverageTrueRange _atr;
 
         // stan sesji
-        private DateTime _sessDay = DateTime.MinValue;
-        private double _sessHi, _sessLo, _sessLast = double.NaN, _prevClose = double.NaN;
-        private readonly List<double> _ranges = new List<double>();
+        private DateTime _sessDay = DateTime.MinValue;   // data otwarcia sesji
+        private double _sessLast = double.NaN, _prevClose = double.NaN;
         private bool _active, _done;
         private double _L, _A;
         private int _gapDir, _nEnt;
@@ -109,21 +116,28 @@ namespace cAlgo.Robots
 
         protected override void OnStart()
         {
-            _open = ParseTime(SessOpenStr, new TimeSpan(9, 0, 0));
-            _close = ParseTime(SessCloseStr, new TimeSpan(17, 30, 0));
+            _open = ParseTime(SessOpenStr, new TimeSpan(23, 0, 0));
+            _close = ParseTime(SessCloseStr, new TimeSpan(22, 0, 0));
+            _wrap = _open > _close;
             _sessTz = FindTz(SessTzId);
             _dayTz = FindTz(DayResetTz);
             _guardDay = ToTz(Server.Time, _dayTz).Date;
             _dayStartBal = Account.Balance;
 
+            _d1 = MarketData.GetBars(TimeFrame.Daily);
+            _atr = Indicators.AverageTrueRange(_d1, AtrDays, MovingAverageType.Simple);
+
             Positions.Closed += OnClosed;
 
-            // rozgrzewka na historii: ATR sesji i zamknięcie poprzedniej sesji, bez handlu
-            for (int j = 1; j < Bars.Count; j++) Step(j, false);
+            Print("Gap Flip: start. Sesja {0:hh\\:mm}–{1:hh\\:mm}{2} ({3}), luka {4}–{5} ATR D1, bufor {6} ATR, TP {7}, maks. {8} wejść/sesję",
+                _open, _close, _wrap ? " (przez północ)" : "", _sessTz.Id, MinGap,
+                MaxGap > 0 ? MaxGap.ToString(CultureInfo.InvariantCulture) : "∞", BufAtr,
+                TpAtr > 0 ? TpAtr.ToString(CultureInfo.InvariantCulture) + " ATR" : "koniec sesji", MaxEntries);
+            _step = BarStep();
+            PrintBreaks();
 
-            Print("Gap Flip: start. Sesja {0}–{1} ({2}), luka {3}–{4} ATR, bufor {5} ATR, TP {6} ATR, maks. {7} wejść/dzień. Historia ATR: {8}/{9} sesji",
-                _open, _close, _sessTz.Id, MinGap, MaxGap > 0 ? MaxGap.ToString(CultureInfo.InvariantCulture) : "∞", BufAtr,
-                TpAtr > 0 ? TpAtr.ToString(CultureInfo.InvariantCulture) : "koniec sesji", MaxEntries, Math.Min(_ranges.Count, AtrDays), AtrDays);
+            // rozgrzewka na historii: zamknięcie poprzedniej sesji, bez handlu
+            for (int j = 1; j < Bars.Count; j++) Step(j, false);
         }
 
         protected override void OnStop()
@@ -162,20 +176,17 @@ namespace cAlgo.Robots
             int c = j - 1;
             var tc = ToTz(Bars.OpenTimes[c], _sessTz);
             var tn = ToTz(Bars.OpenTimes[j], _sessTz);
-            bool closedInSess = InSession(tc) && tc.Date == _sessDay;
-
-            if (closedInSess)
-            {
-                _sessHi = Math.Max(_sessHi, Bars.HighPrices[c]);
-                _sessLo = Math.Min(_sessLo, Bars.LowPrices[c]);
-                _sessLast = Bars.ClosePrices[c];
-            }
+            bool closedInSess = InSession(tc) && SessKey(tc) == _sessDay;
+            if (closedInSess) _sessLast = Bars.ClosePrices[c];
 
             bool nextInSess = InSession(tn);
-            bool newSession = nextInSess && tn.Date != _sessDay;
+            bool newSession = nextInSess && SessKey(tn) != _sessDay;
+
+            // ostatnia świeca sesji (następna byłaby już po Session Close) – zamknij przed przerwą
+            bool lastBar = nextInSess && !newSession && ToTz(Bars.OpenTimes[j] + _step, _sessTz) >= SessEnd(_sessDay);
 
             // koniec sesji (albo nowa sesja bez wcześniejszego zamknięcia) – zamknij pozycje
-            if (live && (!nextInSess || newSession) && MyPositions().Length > 0)
+            if (live && (!nextInSess || newSession || lastBar) && MyPositions().Length > 0)
             {
                 sEod++;
                 CloseAll("koniec sesji");
@@ -183,18 +194,13 @@ namespace cAlgo.Robots
 
             if (newSession)
             {
-                if (_sessDay != DateTime.MinValue && _sessHi > _sessLo)
-                {
-                    _ranges.Add(_sessHi - _sessLo);
-                    _prevClose = _sessLast;
-                }
-                _sessDay = tn.Date;
-                _sessHi = double.MinValue;
-                _sessLo = double.MaxValue;
+                if (_sessDay != DateTime.MinValue && !double.IsNaN(_sessLast)) _prevClose = _sessLast;
+                _sessDay = SessKey(tn);
+                _sessLast = double.NaN;
                 SetupDay(j, live);
             }
 
-            if (!live || !_active || _done || _blocked || !closedInSess || !nextInSess || newSession) return;
+            if (!live || !_active || _done || _blocked || !closedInSess || !nextInSess || newSession || lastBar) return;
 
             double close = Bars.ClosePrices[c];
             double buf = BufAtr * _A;
@@ -228,27 +234,44 @@ namespace cAlgo.Robots
             _nEnt = 0;
             if (!live) return;
             sDays++;
-            if (_ranges.Count < AtrDays || double.IsNaN(_prevClose))
+            var t = Bars.OpenTimes[j];
+            if (double.IsNaN(_prevClose))
             {
-                if (LogOn) Print("{0:yyyy-MM-dd}: za mało historii do ATR ({1}/{2} sesji)", _sessDay, _ranges.Count, AtrDays);
+                if (LogOn) Print("{0:yyyy-MM-dd HH:mm}: brak zamknięcia poprzedniej sesji – bez gry", ToTz(t, _sessTz));
                 return;
             }
-            _A = _ranges.Skip(_ranges.Count - AtrDays).Average();
+            _A = AtrAt(t);
+            if (double.IsNaN(_A) || _A <= 0)
+            {
+                if (LogOn) Print("{0:yyyy-MM-dd HH:mm}: brak ATR z D1 (za mało świec dziennych) – bez gry", ToTz(t, _sessTz));
+                return;
+            }
             _L = _prevClose;
             double gap = Bars.OpenPrices[j] - _L;
             _gapDir = gap > 0 ? 1 : -1;
             double g = Math.Abs(gap) / _A;
             if (g < MinGap || (MaxGap > 0 && g > MaxGap))
             {
-                if (LogOn) Print("{0:yyyy-MM-dd}: luka {1:F1} pkt = {2:F2} ATR – poza filtrem, bez gry", _sessDay, gap, g);
+                if (LogOn) Print("{0:yyyy-MM-dd HH:mm}: luka {1:F1} pkt = {2:F2} ATR – poza filtrem {3}–{4}, bez gry",
+                    ToTz(t, _sessTz), gap, g, MinGap, MaxGap);
                 return;
             }
             _active = true;
             sGapDays++;
-            if (LogOn) Print("{0:yyyy-MM-dd}: luka {1} {2:F1} pkt ({3:F2} ATR), poziom {4}, ATR {5:F1} pkt",
-                _sessDay, _gapDir > 0 ? "w górę" : "w dół", gap, g, _L, _A);
+            if (LogOn) Print("{0:yyyy-MM-dd HH:mm}: luka {1} {2:F1} pkt ({3:F2} ATR), poziom {4}, ATR D1 {5:F1} pkt",
+                ToTz(t, _sessTz), _gapDir > 0 ? "w górę" : "w dół", gap, g, _L, _A);
             if (DrawOn) DrawLevel(j);
             if (WithGap && !_blocked) Enter(_gapDir, "wejście z luką na otwarciu");
+        }
+
+        // ATR z ostatniej ZAMKNIĘTEJ świecy dziennej przed czasem t
+        private double AtrAt(DateTime t)
+        {
+            int k = _d1.OpenTimes.GetIndexByTime(t);
+            if (k < 0) k = _d1.Count - 1;
+            if (_d1.OpenTimes[k] <= t) k--;          // świeca dzienna, w której jest t, jeszcze się nie zamknęła
+            if (k < AtrDays) return double.NaN;
+            return _atr.Result[k];
         }
 
         private void Enter(int side, string why)
@@ -271,7 +294,7 @@ namespace cAlgo.Robots
             units = Math.Min(Symbol.NormalizeVolumeInUnits(units, RoundingMode.Down), Symbol.VolumeInUnitsMax);
             if (units < Symbol.VolumeInUnitsMin)
             {
-                if (LogOn) Print("Za mały wolumen ({0}) – wejście pominięte", units);
+                if (LogOn) Print("Za mały wolumen ({0}) – wejście pominięte. Zwiększ Risk per Entry albo użyj Fixed Lots", units);
                 return;
             }
 
@@ -289,7 +312,7 @@ namespace cAlgo.Robots
                 if (LogOn) Print("Brak SL na pozycji – zamknięta");
                 return;
             }
-            if (LogOn) Print("{0} #{1}: {2} {3} @ {4}, SL {5:F1}, TP {6}, strata do SL {7:F0} $",
+            if (LogOn) Print("{0} #{1}: {2} {3} lot @ {4}, SL {5:F1}, TP {6}, strata do SL {7:F0} $",
                 type == TradeType.Buy ? "LONG" : "SHORT", _nEnt, why, Symbol.VolumeInUnitsToQuantity(units), r.Position.EntryPrice,
                 r.Position.StopLoss, r.Position.TakeProfit.HasValue ? r.Position.TakeProfit.Value.ToString("F1") : "–",
                 slPips * Symbol.PipValue * units);
@@ -302,7 +325,7 @@ namespace cAlgo.Robots
             {
                 _done = true;
                 sTp++;
-                if (LogOn) Print("TP: {0:F0} $ – ruch poszedł, koniec gry na dziś", a.Position.NetProfit);
+                if (LogOn) Print("TP: {0:F0} $ – ruch poszedł, koniec gry w tej sesji", a.Position.NetProfit);
             }
             else if (a.Reason == PositionCloseReason.StopLoss)
             {
@@ -314,7 +337,7 @@ namespace cAlgo.Robots
         private void DrawLevel(int j)
         {
             var t1 = Bars.OpenTimes[j];
-            var t2 = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(_sessDay + _close, DateTimeKind.Unspecified), _sessTz);
+            var t2 = TimeZoneInfo.ConvertTimeToUtc(DateTime.SpecifyKind(SessEnd(_sessDay), DateTimeKind.Unspecified), _sessTz);
             string k = _sessDay.ToString("yyyyMMdd");
             Chart.DrawTrendLine("gf_L_" + k, t1, _L, t2, _L, Color.Orange, 2, LineStyle.Solid);
             if (BufAtr > 0)
@@ -323,6 +346,41 @@ namespace cAlgo.Robots
                 Chart.DrawTrendLine("gf_U_" + k, t1, _L + b, t2, _L + b, Color.Orange, 1, LineStyle.Dots);
                 Chart.DrawTrendLine("gf_D_" + k, t1, _L - b, t2, _L - b, Color.Orange, 1, LineStyle.Dots);
             }
+        }
+
+        // długość świecy = najmniejszy odstęp między świecami
+        private TimeSpan BarStep()
+        {
+            var step = TimeSpan.FromDays(1);
+            for (int i = Math.Max(1, Bars.Count - 2000); i < Bars.Count; i++)
+            {
+                var d = Bars.OpenTimes[i] - Bars.OpenTimes[i - 1];
+                if (d > TimeSpan.Zero && d < step) step = d;
+            }
+            return step < TimeSpan.FromDays(1) ? step : TimeSpan.FromMinutes(1);
+        }
+
+        // koniec sesji otwartej w dniu key (czas lokalny strefy sesji)
+        private DateTime SessEnd(DateTime key)
+        {
+            return key + _close + (_wrap ? TimeSpan.FromDays(1) : TimeSpan.Zero);
+        }
+
+        // ostatnie przerwy w notowaniach (> 3 świece) – pomoc przy ustawieniu godzin sesji
+        private void PrintBreaks()
+        {
+            if (Bars.Count < 3) return;
+            var step = _step;
+            var found = new List<string>();
+            for (int i = Bars.Count - 1; i > 0 && found.Count < 5; i--)
+            {
+                var d = Bars.OpenTimes[i] - Bars.OpenTimes[i - 1];
+                if (d.TotalMinutes > step.TotalMinutes * 3 && d.TotalHours < 30)
+                    found.Add(string.Format("ostatnia świeca przed przerwą kończy się {0:ddd HH:mm}, pierwsza po przerwie {1:ddd HH:mm}",
+                        ToTz(Bars.OpenTimes[i - 1] + step, _sessTz), ToTz(Bars.OpenTimes[i], _sessTz)));
+            }
+            Print("Przerwy w notowaniach (strefa {0}) – ustaw Session Close = koniec przed przerwą, Session Open = pierwsza po przerwie:", _sessTz.Id);
+            foreach (var s in found) Print("   " + s);
         }
 
         // ── pomocnicze
@@ -349,9 +407,14 @@ namespace cAlgo.Robots
 
         private bool InSession(DateTime local)
         {
-            if (local.DayOfWeek == DayOfWeek.Saturday || local.DayOfWeek == DayOfWeek.Sunday) return false;
             var t = local.TimeOfDay;
-            return t >= _open && t < _close;
+            return _wrap ? (t >= _open || t < _close) : (t >= _open && t < _close);
+        }
+
+        // data otwarcia sesji, do której należy dana chwila
+        private DateTime SessKey(DateTime local)
+        {
+            return _wrap && local.TimeOfDay < _close ? local.Date.AddDays(-1) : local.Date;
         }
 
         private static DateTime ToTz(DateTime utc, TimeZoneInfo tz)
@@ -372,7 +435,7 @@ namespace cAlgo.Robots
         private static TimeSpan ParseTime(string s, TimeSpan def)
         {
             TimeSpan t;
-            return TimeSpan.TryParseExact((s ?? "").Trim(), @"hh\:mm", CultureInfo.InvariantCulture, out t) ? t : def;
+            return TimeSpan.TryParse((s ?? "").Trim(), CultureInfo.InvariantCulture, out t) && t < TimeSpan.FromDays(1) ? t : def;
         }
     }
 }
