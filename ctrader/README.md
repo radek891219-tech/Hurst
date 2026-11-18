@@ -13,14 +13,11 @@
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
 
 ## Gap Flip (odwracanie wokół luki)
-- Poziom luki = zamknięcie poprzedniej sesji, luka = otwarcie pierwszej świecy sesji − poziom. Gra tylko, gdy luka mieści się w `Min Gap`–`Max Gap` (× ATR z D1).
-- Sesja może iść przez północ (`Session Open` > `Session Close`) – domyślnie 23:00–22:00 Berlin, czyli luka na nocnej przerwie CFD GER40. Dla luki Xetra ustaw 09:00–17:30.
-- Przy starcie bot wypisuje w Dziennikach 5 ostatnich przerw w notowaniach w strefie sesji – według nich ustaw godziny.
-- Luka w górę: zamknięcie świecy pod poziomem − bufor → SHORT, nad poziomem + bufor → odwrócenie na LONG, itd. Luka w dół – lustrzanie.
-- `Max Entries per Session` – po ostatnim wejściu sygnał przeciwny tylko zamyka pozycję. Po TP koniec gry w tej sesji. Na ostatniej świecy przed przerwą wszystko zamykane.
-- Zawsze jest awaryjny SL na serwerze: `Emergency SL Beyond Level` × ATR za poziomem. Od tej odległości liczony jest wolumen przy `Sizing = RiskCash`.
-- ATR z wykresu dziennego – bot gra od pierwszej sesji backtestu.
-- Backtest: GER40 m1, dane tickowe, 1–2 lata. Porównaj `Max Entries` 1 / 3 / 5 i `Take Profit` 0.3 / 0.6 / 1.0 / 0 (koniec sesji). W Dziennikach każda luka, wejście, odwrócenie i powód pominięcia dnia.
+- Wersja podstawowa, bez filtrów: luka = każda świeca, której otwarcie różni się od zamknięcia poprzedniej o ≥ `Min Gap` (pkt), o każdej godzinie.
+- Poziom luki = zamknięcie świecy przed luką. Luka w górę: zamknięcie świecy pod poziomem − bufor → SHORT, nad poziomem + bufor → odwrócenie na LONG, itd. Luka w dół – lustrzanie.
+- Po TP koniec gry na tej luce. `Max Entries per Gap` – po ostatnim wejściu sygnał przeciwny tylko zamyka pozycję. Nowa luka zastępuje starą i zamyka jej pozycję.
+- Zawsze jest awaryjny SL na serwerze: `Emergency SL Beyond Level` pkt za poziomem (od tej odległości liczony jest wolumen przy `Sizing = RiskCash`).
+- Na wykresie: pomarańczowy prostokąt luki i linia poziomu (szara po zakończeniu gry). W Dziennikach każda luka, wejście i odwrócenie, na końcu podsumowanie.
 
 ## HTS Grid (uśrednianie na wstęgach)
 - Ryzyko liczone od najgorszego scenariusza: wszystkie zlecenia wypełnione i SL = `Risk per Basket`. Bot wypisuje w logu łączną stratę koszyka przy każdym nowym koszyku.
