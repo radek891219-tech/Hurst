@@ -13,7 +13,7 @@
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
 
 ## Gap Flip (odwracanie wokół luki)
-- Wersja podstawowa, bez filtrów: luka = każda świeca, która otwiera się za poprzednią o ≥ `Min Gap` (pkt), o każdej godzinie. `Gap Type`: `OpenBeyondHighLow` (domyślnie) – otwarcie powyżej high / poniżej low poprzedniej świecy (prawdziwa dziura), `OpenVsClose` – otwarcie vs zamknięcie poprzedniej (łapie też szybkie skoki).
+- Wersja podstawowa, bez filtrów: luka = każda świeca, która otwiera się za poprzednią o ≥ `Min Gap` (pkt), o każdej godzinie. `Gap Type`: `FullGap` (domyślnie) – cała świeca za poprzednią, bez zachodzenia (low powyżej high poprzedniej / high poniżej low), sprawdzane na zamknięciu świecy luki; `OpenBeyondHighLow` – samo otwarcie za high/low poprzedniej; `OpenVsClose` – otwarcie vs zamknięcie poprzedniej (łapie też szybkie skoki).
 - Poziom luki = zamknięcie świecy przed luką. Luka w górę: zamknięcie świecy pod poziomem − bufor → SHORT, nad poziomem + bufor → odwrócenie na LONG, itd. Luka w dół – lustrzanie.
 - Po TP koniec gry na tej luce. `Max Entries per Gap` – po ostatnim wejściu sygnał przeciwny tylko zamyka pozycję. Nowa luka zastępuje starą i zamyka jej pozycję.
 - Zawsze jest awaryjny SL na serwerze: `Emergency SL Beyond Level` pkt za poziomem (od tej odległości liczony jest wolumen przy `Sizing = RiskCash`).
