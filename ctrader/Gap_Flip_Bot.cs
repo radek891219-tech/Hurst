@@ -1,7 +1,9 @@
 // Gap Flip – odwracanie pozycji wokół poziomu luki (cBot / strategia dla cTradera)
 //  Zasady (wersja podstawowa – bez filtrów, kolejne filtry dojdą później):
-//   • luka = każda świeca, której otwarcie różni się od zamknięcia poprzedniej świecy o co najmniej Min Gap (pkt),
-//     bez względu na godzinę (nocna przerwa, weekend, dane makro…),
+//   • luka = każda świeca, która otwiera się za poprzednią świecą o co najmniej Min Gap (pkt), o każdej godzinie:
+//       Gap Type = OpenBeyondHighLow (domyślnie): otwarcie powyżej HIGH poprzedniej (luka w górę) / poniżej LOW (w dół)
+//                  – prawdziwa dziura na wykresie, świece na siebie nie zachodzą,
+//       Gap Type = OpenVsClose: otwarcie różni się od CLOSE poprzedniej (łapie też szybkie skoki na przełomie świecy),
 //   • poziom luki L = zamknięcie świecy przed luką,
 //   • luka w górę: świeca zamyka się POD L − bufor → SHORT; potem zamyka się NAD L + bufor → odwrócenie na LONG;
 //     znowu pod → SHORT … i tak dalej, aż cena pójdzie w jedną stronę (TP),
@@ -20,6 +22,7 @@ using cAlgo.API.Internals;
 namespace cAlgo.Robots
 {
     public enum GfSizing { FixedLots, RiskCash }
+    public enum GfGapType { OpenBeyondHighLow, OpenVsClose }
 
     [Robot(TimeZone = TimeZones.UTC, AccessRights = AccessRights.None)]
     public class Gap_Flip_Bot : Robot
@@ -35,6 +38,9 @@ namespace cAlgo.Robots
         public bool DrawOn { get; set; }
 
         // ── Luka
+        [Parameter("Gap Type", DefaultValue = GfGapType.OpenBeyondHighLow, Group = "Gap")]
+        public GfGapType GapType { get; set; }
+
         [Parameter("Min Gap (points)", DefaultValue = 10.0, MinValue = 0.0, Group = "Gap")]
         public double MinGap { get; set; }
 
@@ -92,8 +98,9 @@ namespace cAlgo.Robots
 
             Positions.Closed += OnClosed;
 
-            Print("Gap Flip: start. Luka ≥ {0} pkt, bufor {1} pkt, maks. {2} wejść na lukę, TP {3}, awaryjny SL {4} pkt za poziomem",
-                MinGap, Buf, MaxEntries, TpPts > 0 ? TpPts.ToString(CultureInfo.InvariantCulture) + " pkt" : "wył.", SlPts);
+            Print("Gap Flip: start. Typ luki {5}, luka ≥ {0} pkt, bufor {1} pkt, maks. {2} wejść na lukę, TP {3}, awaryjny SL {4} pkt za poziomem",
+                MinGap, Buf, MaxEntries, TpPts > 0 ? TpPts.ToString(CultureInfo.InvariantCulture) + " pkt" : "wył.", SlPts,
+                GapType == GfGapType.OpenBeyondHighLow ? "otwarcie za high/low poprzedniej świecy" : "otwarcie vs zamknięcie poprzedniej świecy");
         }
 
         protected override void OnStop()
@@ -128,8 +135,8 @@ namespace cAlgo.Robots
             if (c < 1) return;
 
             // 1) nowa luka na otwarciu świecy j – zastępuje poprzednią
-            double gap = Bars.OpenPrices[j] - Bars.ClosePrices[c];
-            if (Math.Abs(gap) >= MinGap && Math.Abs(gap) > 0)
+            double gap = GapSize(j, c);   // > 0 luka w górę, < 0 w dół, 0 brak
+            if (gap != 0 && Math.Abs(gap) >= MinGap)
             {
                 NewGap(j, c, gap);
                 return;
@@ -141,6 +148,16 @@ namespace cAlgo.Robots
                 Signal(Bars.ClosePrices[c]);
                 if (DrawOn) DrawLevel(Bars.OpenTimes[j]);
             }
+        }
+
+        // wielkość luki wg wybranego typu (dla OpenBeyondHighLow: odległość otwarcia od high/low poprzedniej świecy)
+        private double GapSize(int j, int c)
+        {
+            double o = Bars.OpenPrices[j];
+            if (GapType == GfGapType.OpenVsClose) return o - Bars.ClosePrices[c];
+            if (o > Bars.HighPrices[c]) return o - Bars.HighPrices[c];
+            if (o < Bars.LowPrices[c]) return o - Bars.LowPrices[c];
+            return 0;
         }
 
         private void NewGap(int j, int c, double gap)
@@ -159,8 +176,9 @@ namespace cAlgo.Robots
             _gapDir = gap > 0 ? 1 : -1;
             _gapTime = Bars.OpenTimes[j];
             _gapId = _gapTime.ToString("yyyyMMddHHmm");
-            if (LogOn) Print("Luka {0} {1:F1} pkt: {2} → {3} (poziom {2}), przerwa {4:F0} min",
-                _gapDir > 0 ? "w górę" : "w dół", gap, _L, _gapOpen, (Bars.OpenTimes[j] - Bars.OpenTimes[c]).TotalMinutes);
+            if (LogOn) Print("Luka {0}: {1:F1} pkt za {2} poprzedniej świecy, zamknięcie {3} → otwarcie {4} (poziom {3}), przerwa {5:F0} min",
+                _gapDir > 0 ? "w górę" : "w dół", Math.Abs(gap), GapType == GfGapType.OpenVsClose ? "close" : (_gapDir > 0 ? "high" : "low"),
+                _L, _gapOpen, (Bars.OpenTimes[j] - Bars.OpenTimes[c]).TotalMinutes);
             if (DrawOn)
             {
                 Chart.DrawRectangle("gf_Z_" + _gapId, Bars.OpenTimes[c], _L, _gapTime, _gapOpen, Color.FromArgb(70, 255, 165, 0)).IsFilled = true;
