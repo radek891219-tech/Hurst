@@ -9,7 +9,16 @@
 | `HTS_Hurst_Bot.cs` | cBot grający sygnały HTS + Hurst – do backtestu (ryzyko w $, SL za pasmem ekstremalnym, TP w R, FTMO) |
 | `HTS_TrendStart_Bot.cs` | Strategia (cBot) wczesnego wykrywania trendu: START + dokładki do wygrywającej pozycji, wybrany wariant zarządzania, ryzyko w $, okno handlu, FTMO. Bez rysowania na wykresie |
 | `HTS_Grid_Bot.cs` | HTS Grid – uśrednianie na wstęgach: koszyk limitów od szybkiej do wolnej wstęgi (np. 1/3 + 2/3), wspólny SL za wolną wstęgą, stałe ryzyko koszyka, cel w R od faktycznej straty, cross zamyka wszystko, po SL czeka na nowy cross, bezpiecznik dzienny |
+| `Gap_Flip_Bot.cs` | Gap Flip – odwracanie pozycji wokół poziomu luki: przebicie luki → short, powrót nad → long, itd., aż ruch pójdzie w jedną stronę (TP w ATR albo koniec sesji) |
 | `FtmoGuard.cs` | Opcjonalny osobny strażnik – gdy na koncie chodzi kilka botów |
+
+## Gap Flip (odwracanie wokół luki)
+- Poziom luki = zamknięcie poprzedniej sesji (`Session Close`, domyślnie 17:30 Berlin), luka = otwarcie sesji (09:00) − poziom. Gra tylko, gdy luka mieści się w `Min Gap`–`Max Gap` (× ATR sesji).
+- Luka w górę: zamknięcie świecy pod poziomem − bufor → SHORT, nad poziomem + bufor → odwrócenie na LONG, itd. Luka w dół – lustrzanie.
+- `Max Entries per Day` – po ostatnim wejściu sygnał przeciwny tylko zamyka pozycję. Po TP koniec gry na ten dzień. Na koniec sesji wszystko zamykane.
+- Zawsze jest awaryjny SL na serwerze: `Emergency SL Beyond Level` × ATR za poziomem. Od tej odległości liczony jest wolumen przy `Sizing = RiskCash` – faktyczna strata przy odwróceniu jest zwykle dużo mniejsza.
+- Bot potrzebuje `ATR Sessions` (20) sesji historii przed pierwszą grą; uruchomiony w trakcie sesji zaczyna od następnego dnia.
+- Backtest: GER40 / DE40 m1, dane tickowe, 1–2 lata. Porównaj `Max Entries` 1 / 3 / 5 i `Take Profit` 0.3 / 0.6 / 1.0 / 0 (koniec sesji). Ustawienia dobieraj na pierwszym roku, oceniaj na drugim. W logu każda luka, wejście i odwrócenie, na końcu podsumowanie.
 
 ## HTS Grid (uśrednianie na wstęgach)
 - Ryzyko liczone od najgorszego scenariusza: wszystkie zlecenia wypełnione i SL = `Risk per Basket`. Bot wypisuje w logu łączną stratę koszyka przy każdym nowym koszyku.

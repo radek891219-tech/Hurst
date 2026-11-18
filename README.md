@@ -15,7 +15,7 @@ Dwa skrypty:
 | `HTS_Strategy_TV.pine` | Strategia HTS (cBot cTrader) na TradingView: pasma H1 i m1, trend, pullback, wejścia, SL/TP1, trailing, ochrona FTMO, statystyki |
 | `EU_vs_US_Sesje.pine` | Europa vs USA: czy sesja USA odwraca albo kontynuuje ruch Europy (09:00 Berlin → otwarcie USA → koniec sesji USA). Korelacja, ruch USA po dużym ruchu Europy, stabilność w dwóch połowach historii, wniosek z istotnością |
 | `SL_DwaWejscia.pine` | Kalkulator pozycji na wykresie: od aktualnej ceny strefa SL za stałe ryzyko (100 $) – obok ten sam SL z dwoma wejściami (drugie w połowie drogi do SL), loty, ryzyko i średnia cena |
-| *(badanie)* `research/gap_flip.py` | Gap Flip: luka na otwarciu, short po przebiciu poziomu luki, long po powrocie nad, odwracanie aż ruch pójdzie w jedną stronę – test na historii DAX |
+| `ctrader/Gap_Flip_Bot.cs` | Gap Flip (cBot cTrader): luka na otwarciu sesji, short po przebiciu poziomu luki, long po powrocie nad, odwracanie aż ruch pójdzie w jedną stronę; TP w ATR albo koniec sesji, awaryjny SL, ryzyko w $, dzienny limit straty |
 | `HurstScalper_1m.pine` | Szybki scalper na MNQ/NQ: wejścia z trendem i z odbicia wg reżimu Hursta, TP/SL w $, symulacja wyników po kosztach, dzienny limit |
 
 ## Instalacja
